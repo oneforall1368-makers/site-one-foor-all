@@ -1,0 +1,20 @@
+ADMIN_PANEL_PASSWORD >>>>>    Massoud1368
+
+APP_BASE_URL  >>>  https://one-for-all-production.up.railway.app/
+
+
+BOT_TOKEN>>   8792456550:AAEuvnzzCUXniBhIWz6C-qabX96EvPWqN7A
+
+BROADCAST_MODE  >>>  true
+
+GROQ_API_KEY>>>  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
+
+NEWS_HOUR >>>>   09
+
+NEWS_MINUTE>>> 00
+
+PYTHON_VERSION>>   3.11.0
+
+SUPABASE_KEY >>  sb_publishable_KgowTs_lXEBsBc3pb78dxA_8zNU-D-I
+
+SUPABASE_URL >>>  https://erwimqqskkzcsayvhxot.supabase.co
