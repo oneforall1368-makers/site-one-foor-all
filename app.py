@@ -5315,25 +5315,37 @@ def get_alerts():
 
 @app.route("/api/alerts/my", methods=["GET"])
 def get_my_alerts():
-    """آلارم‌های شخصی یه کاربر — با name یا cid فیلتر میشه"""
+    """آلارم‌های شخصیِ یه کاربر (چه عادی چه شخصی/is_private) — با name فیلتر میشه.
+    اگه این اسم صاحب کد فعال‌سازی (web_pin) باشه، حتماً باید pin هم درست بیاد،
+    وگرنه (کاربرهایی که هنوز کد نگرفتن) طبق روال قبل فقط با تطابق اسم برمی‌گرده."""
     name = request.args.get("name", "").strip()
     cid  = request.args.get("cid",  "").strip()
+    pin  = request.args.get("pin",  "").strip()
     if not name and not cid:
         return jsonify([])
     data = load_alerts()
     all_alerts = data.get("alerts", [])
-    # اگه name داریم، chat_id متناظر رو از users پیدا کن
+    name_lc = name.lower()
     resolved_cid = cid
+    matched_user = None
     if name and not resolved_cid:
         for usr in data.get("users", []):
-            if usr.get("custom_name", "").strip() == name:
+            if usr.get("custom_name", "").strip().lower() == name_lc:
+                matched_user = usr
                 resolved_cid = str(usr.get("chat_id", ""))
                 break
+    if matched_user and matched_user.get("web_pin"):
+        if str(pin) != str(matched_user.get("web_pin")):
+            return jsonify([])
     my = [
         a for a in all_alerts
-        if a.get("is_private") and (
-            (resolved_cid and str(a.get("private_cid", "")) == resolved_cid) or
-            (name and a.get("created_by", "").strip() == name)
+        if (
+            a.get("is_private") and (
+                (resolved_cid and str(a.get("private_cid", "")) == resolved_cid) or
+                (name and a.get("created_by", "").strip().lower() == name_lc)
+            )
+        ) or (
+            not a.get("is_private") and name and a.get("created_by", "").strip().lower() == name_lc
         )
     ]
     return jsonify(my)
