@@ -528,6 +528,7 @@ select option{background:var(--bg3)}
     <div><span class="user-name-label">شما</span> <span class="user-name-value" id="user-name-display">...</span></div>
     <div class="user-edit-icon">✎</div>
   </div>
+  <div style="cursor:pointer;font-size:11px;color:var(--text2);margin:-8px 0 1.2rem 0" onclick="setUserPin()">🔑 کد فعال‌سازی (فقط برای اعضای جدیدی که از تلگرام کد گرفتن)</div>
 
   <div class="tabs">
     <button class="tab on t-my" onclick="switchTab('alerts',this,'all')">⭐ آلارم‌های من</button>
@@ -763,6 +764,14 @@ function getUserName() {
   }
   return name;
 }
+function getUserPin() { return (localStorage.getItem('trader_pin') || '').trim(); }
+function setUserPin() {
+  const pin = prompt('🔑 کدی که از ادمین (ربات تلگرام) دریافت کردی رو وارد کن:', getUserPin());
+  if (pin !== null) {
+    localStorage.setItem('trader_pin', pin.trim());
+    toast('✅ کد ذخیره شد.');
+  }
+}
 function updateUserDisplay() { document.getElementById('user-name-display').textContent = getUserName(); }
 function changeUserName() {
   const newName = prompt('نام جدید خود را وارد کنید:', getUserName());
@@ -898,6 +907,7 @@ async function addAlert() {
   const condition = document.getElementById('adir').value;
   const comment = document.getElementById('acmt').value.trim();
   const creator = getUserName();
+  const pin = getUserPin();
   if (!symbol) { toast('نماد الزامی است'); return; }
   if (!target_price || target_price <= 0) { toast('قیمت هدف را وارد کنید'); return; }
   const btn = document.getElementById('add-btn');
@@ -905,7 +915,7 @@ async function addAlert() {
   const r = await fetch(`${API}/api/alerts`, {
     method: 'POST',
     headers: {'Content-Type': 'application/json'},
-    body: JSON.stringify({symbol, type, target_price, condition, comment, creator})
+    body: JSON.stringify({symbol, type, target_price, condition, comment, creator, pin})
   });
   const d = await r.json();
   btn.textContent = '+ افزودن'; btn.disabled = false;
@@ -915,7 +925,7 @@ async function addAlert() {
     document.getElementById('tprice').value = '';
     document.getElementById('acmt').value = '';
     await loadAlerts();
-  } else toast('❌ خطا در ثبت آلارم');
+  } else toast(`❌ ${d.error || 'خطا در ثبت آلارم'}`);
 }
 
 async function sendInstant() {
@@ -925,6 +935,7 @@ async function sendInstant() {
   const condition = document.getElementById('adir').value;
   const comment = document.getElementById('acmt').value.trim();
   const creator = getUserName();
+  const pin = getUserPin();
   if (!symbol) { toast('نماد را وارد کنید'); return; }
   const btn = document.getElementById('instant-btn');
   const orig = btn.innerHTML;
@@ -933,7 +944,7 @@ async function sendInstant() {
     const r = await fetch(`${API}/api/instant-alert`, {
       method: 'POST',
       headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({ symbol, type, target_price, condition, comment, creator })
+      body: JSON.stringify({ symbol, type, target_price, condition, comment, creator, pin })
     });
     const d = await r.json();
     if (d.ok) {
