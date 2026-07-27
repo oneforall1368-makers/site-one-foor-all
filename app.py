@@ -1765,11 +1765,18 @@ MAIN_MENU_ADMIN = [
     ["⚡ آلارم فوری",   "⏰ هشدار دوره‌ای من"],
     ["📡 سیگنال جدید", "⚙️ پنل ادمین"],
 ]
+# منوی محدود برای اعضای جدید تا وقتی که ادمین تاییدشون نکرده
+MAIN_MENU_NEW = [
+    ["📊 وضعیت"],
+    ["📩 درخواست فعال‌سازی آلارم"],
+]
 DIR_MENU = [["📈 BUY", "📉 SELL"], ["❌ انصراف"]]
 
 def show_main_menu(token, cid, text, is_admin=False):
     if is_admin:
         rows = MAIN_MENU_ADMIN
+    elif not _is_approved(cid):
+        rows = MAIN_MENU_NEW
     elif _has_private_access(cid):
         rows = MAIN_MENU_PRIVATE
     else:
@@ -1791,6 +1798,18 @@ def _has_private_access(cid):
     for u in data.get("users", []):
         if str(u.get("chat_id","")) == str(cid):
             return bool(u.get("private_access", False))
+    return False
+
+def _is_approved(cid):
+    """آیا این کاربر اجازه‌ی استفاده کامل (ثبت آلارم و بقیه امکانات) داره؟
+    کاربرهای قدیمی که فیلد approved ندارن به صورت پیش‌فرض تاییدشده حساب می‌شن،
+    فقط اعضای جدید (که این فیلد رو صریحاً False دارن) باید تایید ادمین رو بگیرن."""
+    if str(cid) == str(YOUR_CHAT_ID):
+        return True
+    data = load_alerts()
+    for u in data.get("users", []):
+        if str(u.get("chat_id","")) == str(cid):
+            return bool(u.get("approved", True))
     return False
 
 def _get_sender_name(msg):
@@ -2275,6 +2294,48 @@ def _do_update(upd, token):
                             except: pass
                             send_tg(token_cbq, cbq_cid, f"❌ درخواست <code>{target_cid}</code> رد شد.")
                             send_tg(token_cbq, target_cid,
+                                "❌ <b>درخواست شما رد شد.</b>\n\n"
+                                "برای اطلاعات بیشتر با ادمین تماس بگیرید.")
+
+                    elif cbq_data.startswith("approve_signup:"):
+                        if cbq_cid != YOUR_CHAT_ID:
+                            answer_callback(token_cbq, cbq_id, "⛔ فقط ادمین")
+                        else:
+                            target_cid_su = cbq_data.split(":")[1]
+                            answer_callback(token_cbq, cbq_id, "✅ فعال شد")
+                            d_apr_su = load_alerts()
+                            found_su = False
+                            for u in d_apr_su.get("users", []):
+                                if str(u.get("chat_id","")) == target_cid_su:
+                                    u["approved"] = True
+                                    found_su = True
+                                    break
+                            if not found_su:
+                                d_apr_su.setdefault("users",[]).append({"chat_id": target_cid_su, "username": "", "joined_at": now_pretty(), "custom_name": "", "approved": True})
+                            save_alerts(d_apr_su)
+                            try:
+                                requests.post(f"https://api.telegram.org/bot{token_cbq}/editMessageReplyMarkup",
+                                    json={"chat_id": cbq_cid, "message_id": cbq_msg_id, "reply_markup": {"inline_keyboard": []}},
+                                    timeout=10, headers=H)
+                            except: pass
+                            send_tg(token_cbq, cbq_cid, f"✅ عضو <code>{target_cid_su}</code> تایید و فعال شد.")
+                            send_tg(token_cbq, target_cid_su,
+                                "🎉 <b>درخواست شما تایید شد!</b>\n\n"
+                                "یکبار /start بزنید تا منو به‌روز شود. ✅")
+
+                    elif cbq_data.startswith("reject_signup:"):
+                        if cbq_cid != YOUR_CHAT_ID:
+                            answer_callback(token_cbq, cbq_id, "⛔ فقط ادمین")
+                        else:
+                            target_cid_su = cbq_data.split(":")[1]
+                            answer_callback(token_cbq, cbq_id, "❌ رد شد")
+                            try:
+                                requests.post(f"https://api.telegram.org/bot{token_cbq}/editMessageReplyMarkup",
+                                    json={"chat_id": cbq_cid, "message_id": cbq_msg_id, "reply_markup": {"inline_keyboard": []}},
+                                    timeout=10, headers=H)
+                            except: pass
+                            send_tg(token_cbq, cbq_cid, f"❌ درخواست <code>{target_cid_su}</code> رد شد.")
+                            send_tg(token_cbq, target_cid_su,
                                 "❌ <b>درخواست شما رد شد.</b>\n\n"
                                 "برای اطلاعات بیشتر با ادمین تماس بگیرید.")
 
@@ -3582,7 +3643,7 @@ def _do_update(upd, token):
                     existing_name = existing_user.get("custom_name","").strip() if existing_user else ""
                     # ثبت کاربر اگه جدیده
                     if not existing_user:
-                        users.append({"chat_id": cid, "username": uname, "joined_at": now_teh(), "custom_name": "", "private_access": False})
+                        users.append({"chat_id": cid, "username": uname, "joined_at": now_teh(), "custom_name": "", "private_access": False, "approved": False})
                         data["users"] = users
                         ids = data.get("telegram", {}).get("chat_ids", [])
                         if cid not in [str(x) for x in ids]:
@@ -3730,7 +3791,7 @@ def _do_update(upd, token):
                                 found = True
                                 break
                         if not found:
-                            users.append({"chat_id": cid, "username": uname, "joined_at": now_teh(), "custom_name": custom_name})
+                            users.append({"chat_id": cid, "username": uname, "joined_at": now_teh(), "custom_name": custom_name, "approved": False})
                             data["users"] = users
                             ids = data.get("telegram", {}).get("chat_ids", [])
                             if cid not in [str(x) for x in ids]:
@@ -3997,6 +4058,29 @@ def _do_update(upd, token):
                                 send_tg(token, cid, f"✅ در <b>{edited_count}</b> چت ثبت شد.")
                             else:
                                 send_tg(token, cid, "⚠️ نشد ویرایش کرد.")
+                elif txt == "📩 درخواست فعال‌سازی آلارم":
+                    if _is_approved(cid):
+                        show_main_menu(token, cid, "✅ شما قبلاً تایید شدید و به همه امکانات دسترسی دارید.", cid == YOUR_CHAT_ID)
+                    else:
+                        send_tg(token, cid,
+                            "📩 <b>درخواست شما ثبت شد</b>\n\n"
+                            "درخواست فعال‌سازی شما برای ادمین ارسال شد و در دست بررسی است.\n"
+                            "پس از تایید، یک پیام دریافت خواهید کرد. 🙏")
+                        d_su = load_alerts()
+                        su_user = next((u for u in d_su.get("users",[]) if str(u.get("chat_id","")) == cid), {})
+                        su_name = su_user.get("custom_name","") or su_user.get("username","") or cid
+                        admin_notif_su = (
+                            f"📩 <b>درخواست فعال‌سازی عضو جدید</b>\n\n"
+                            f"👤 نام: <b>{su_name}</b>\n"
+                            f"🆔 Chat ID: <code>{cid}</code>\n"
+                            f"⏰ {now_pretty()} (تهران)"
+                        )
+                        approve_kb_su = [
+                            [{"text": "✅ تایید و فعال‌سازی", "callback_data": f"approve_signup:{cid}"}],
+                            [{"text": "❌ رد درخواست",       "callback_data": f"reject_signup:{cid}"}],
+                        ]
+                        send_tg_keyboard(token, YOUR_CHAT_ID, admin_notif_su, approve_kb_su)
+
                 elif txt in ("📊 وضعیت",) or (txt.startswith("/status") and txt not in ("/statuspage",)):
                     d2 = load_alerts()
                     all_active2 = [a for a in d2.get("alerts",[]) if a.get("active")]
@@ -4074,7 +4158,7 @@ def _do_update(upd, token):
                         edit_tg_keyboard(token, cid, pend_cancel["bot_msg_id"],
                             "❌ <b>عملیات لغو شد.</b>", [])
 
-                elif txt == "📈 آلارم جدید" and (cid == YOUR_CHAT_ID or BROADCAST_MODE):
+                elif txt == "📈 آلارم جدید" and (cid == YOUR_CHAT_ID or (BROADCAST_MODE and _is_approved(cid))):
                     kb_new = [[{"text": "❌ انصراف", "callback_data": f"flow_cancel:{cid}"}]]
                     mid_new = send_tg_keyboard(token, cid,
                         "🔔 <b>آلارم جدید</b>\n\nاسم نماد رو بنویس:\n<code>EURUSD</code>  <code>XAUUSD</code>  <code>BTC</code>",
@@ -4093,7 +4177,7 @@ def _do_update(upd, token):
                         _pending_alarm[cid] = {"step": "alarm_symbol", "data": {"ptype": "private"}, "bot_msg_id": mid_priv}
 
 
-                elif txt == "⚡ آلارم فوری" and (cid == YOUR_CHAT_ID or BROADCAST_MODE):
+                elif txt == "⚡ آلارم فوری" and (cid == YOUR_CHAT_ID or (BROADCAST_MODE and _is_approved(cid))):
                     kb_sos = [[{"text": "❌ انصراف", "callback_data": f"flow_cancel:{cid}"}]]
                     mid_sos = send_tg_keyboard(token, cid,
                         "⚡ <b>آلارم فوری</b>\n\nاسم نماد رو بنویس:\n<code>EURUSD</code>  <code>XAUUSD</code>  <code>BTC</code>",
@@ -4441,7 +4525,7 @@ def _do_update(upd, token):
                         _show_signal_preview(token, cid, ps_mid, ps_data)
 
                 # ── /sos ─────────────────────────────────────────────
-                elif txt.startswith("/sos") and (cid == YOUR_CHAT_ID or BROADCAST_MODE):
+                elif txt.startswith("/sos") and (cid == YOUR_CHAT_ID or (BROADCAST_MODE and _is_approved(cid))):
                     parts = txt.split(maxsplit=3)
                     if len(parts) < 2:
                         send_tg(token, cid,
@@ -4497,7 +4581,7 @@ def _do_update(upd, token):
                         threading.Thread(target=_sb_upsert_alert, args=(new_sos_entry,), daemon=True).start()
 
                 # ── /alarm ───────────────────────────────────────────
-                elif txt.startswith("/alarm") and (cid == YOUR_CHAT_ID or BROADCAST_MODE):
+                elif txt.startswith("/alarm") and (cid == YOUR_CHAT_ID or (BROADCAST_MODE and _is_approved(cid))):
                     parts = txt.split(maxsplit=4)
                     if len(parts) < 4:
                         send_tg(token, cid,
