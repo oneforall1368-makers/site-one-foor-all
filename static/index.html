@@ -530,8 +530,7 @@ select option{background:var(--bg3)}
   </div>
 
   <div class="tabs">
-    <button class="tab on t-alerts" onclick="switchTab('alerts',this,'all')">📈 همه آلارم‌ها</button>
-    <button class="tab t-my" onclick="switchTab('myalerts',this,'my')">⭐ آلارم‌های من</button>
+    <button class="tab on t-my" onclick="switchTab('alerts',this,'all')">⭐ آلارم‌های من</button>
     <button class="tab t-arch" onclick="switchTab('archive',this,'')">📦 بایگانی</button>
     <button class="tab t-sig" onclick="switchTab('signals',this,'')">📡 سیگنال</button>
   </div>
@@ -568,10 +567,10 @@ select option{background:var(--bg3)}
     </div>
 
     <div class="sec">
-      <div class="sec-hd"><div class="sec-ttl"><span class="sec-dot green"></span>در حال رصد</div></div>
+      <div class="sec-hd"><div class="sec-ttl"><span class="sec-dot green"></span>آلارم‌های من</div></div>
       <div class="upd-bar"><span class="upd-dot" id="upd-dot"></span><span id="upd-txt">در انتظار اولین بررسی...</span><span style="margin-right:auto" id="upd-time"></span></div>
       <div class="filter-bar">
-        <div class="search-box"><i>🔍</i><input type="text" id="search-input-all" placeholder="جستجو بر اساس نماد یا نام کاربر..." oninput="filterAlerts()"></div>
+        <div class="search-box"><i>🔍</i><input type="text" id="search-input-all" placeholder="جستجو بر اساس نماد..." oninput="filterAlerts()"></div>
         <div class="sort-area"><span>مرتب‌سازی:</span><select id="sort-select-all" onchange="filterAlerts()"><option value="distance">📏 نزدیک‌ترین هدف</option><option value="newest">🕒 جدیدترین ثبت</option></select></div>
         <div class="view-toggle" id="view-toggle-all">
           <button class="view-btn" data-view="card" onclick="setViewMode('all','card')">▤</button>
@@ -580,22 +579,6 @@ select option{background:var(--bg3)}
       </div>
       <div id="cards-container-all" class="cards-grid"></div>
       <div class="err-log" id="err-log"><div class="err-log-ttl">⚠ خطاهای اخیر</div><div id="err-items"></div></div>
-    </div>
-  </div>
-
-  <!-- MY ALERTS PANEL -->
-  <div class="pnl" id="pnl-myalerts">
-    <div class="sec">
-      <div class="sec-hd"><div class="sec-ttl"><span class="sec-dot purple"></span>آلارم‌های من</div></div>
-      <div class="filter-bar" style="border-top:none">
-        <div class="search-box"><i>🔍</i><input type="text" id="search-input-my" placeholder="جستجو در آلارم‌های من..." oninput="filterAlerts()"></div>
-        <div class="sort-area"><span>مرتب‌سازی:</span><select id="sort-select-my" onchange="filterAlerts()"><option value="distance">📏 نزدیک‌ترین هدف</option><option value="newest">🕒 جدیدترین ثبت</option></select></div>
-        <div class="view-toggle" id="view-toggle-my">
-          <button class="view-btn" data-view="card" onclick="setViewMode('my','card')">▤</button>
-          <button class="view-btn" data-view="list" onclick="setViewMode('my','list')">☰</button>
-        </div>
-      </div>
-      <div id="cards-container-my" class="cards-grid"></div>
     </div>
   </div>
 
@@ -1103,8 +1086,14 @@ function filterAlerts() {
   if (currentTab === 'alerts') {
     currentSearchAll = document.getElementById('search-input-all').value.toLowerCase();
     currentSortAll = document.getElementById('sort-select-all').value;
-    // آلارم‌های شخصی (is_private) از لیست عمومی حذف می‌شن
-    let filtered = allAlertsData.filter(a => a.active && !a.is_private);
+    const currentUser = getUserName();
+    // فقط آلارم‌های خود کاربر (عادی + شخصی/is_private) نمایش داده بشه
+    let filtered = allAlertsData.filter(a => a.active && a.created_by === currentUser);
+    for (const pa of allPrivateData) {
+      if (pa.active && pa.created_by === currentUser && !filtered.find(x => x.id === pa.id)) {
+        filtered.push(pa);
+      }
+    }
     if (currentSearchAll) {
       filtered = filtered.filter(a => 
         a.symbol.toLowerCase().includes(currentSearchAll) || 
@@ -1139,9 +1128,7 @@ function filterAlerts() {
 function renderAlertsToContainer(alerts, containerId, viewMode) {
   const container = document.getElementById(containerId);
   if (!alerts.length) {
-    const emptyMsg = containerId === 'cards-container-all' ? 
-      '<div class="empty"><div class="empty-ico">◎</div><p>آلارمی ثبت نشده</p></div>' : 
-      '<div class="empty"><div class="empty-ico">◎</div><p>شما هنوز آلارمی ثبت نکرده‌اید</p></div>';
+    const emptyMsg = '<div class="empty"><div class="empty-ico">◎</div><p>شما هنوز آلارمی ثبت نکرده‌اید</p></div>';
     container.innerHTML = emptyMsg;
     return;
   }
