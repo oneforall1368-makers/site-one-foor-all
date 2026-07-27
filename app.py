@@ -1812,6 +1812,27 @@ def _is_approved(cid):
             return bool(u.get("approved", True))
     return False
 
+def _is_name_approved(name: str, pin: str = "") -> bool:
+    """نسخه‌ی مبتنی بر اسم _is_approved — برای گیت کردن ثبت آلارم از سایت (وب)،
+    جایی که chat_id نداریم و فقط اسمی که کاربر توی سایت انتخاب کرده در دسترسه.
+    اسم با custom_name کاربرهای تلگرام مطابقت داده می‌شه.
+    برای کاربرهایی که از این به بعد از طریق «درخواست فعال‌سازی» تایید می‌شن، یک کد (web_pin) هم
+    باید مطابقت داشته باشه — تا صرفاً تایپ کردن اسمِ یک نفر دیگه کافی برای دور زدن تایید نباشه.
+    کاربرهای قدیمی که web_pin ندارن (چون قبل از این قابلیت ثبت‌نام کردن) طبق روال قبل فقط با تطابق اسم عبور می‌کنن."""
+    name = (name or "").strip().lower()
+    if not name:
+        return False
+    data = load_alerts()
+    for u in data.get("users", []):
+        un = (u.get("custom_name") or "").strip().lower()
+        if un and un == name:
+            required_pin = u.get("web_pin")
+            if required_pin:
+                return str(pin or "").strip() == str(required_pin)
+            return bool(u.get("approved", True))
+    # اسمی که به هیچ کاربر تاییدشده‌ی تلگرام تطابق نداشته باشه (یعنی هنوز از تلگرام تاییدیه نگرفته) — اجازه نداره
+    return False
+
 def _get_sender_name(msg):
     """اسم فرستنده — اول custom_name، بعد اسم تلگرام"""
     u = msg.get("from", {})
@@ -2303,15 +2324,17 @@ def _do_update(upd, token):
                         else:
                             target_cid_su = cbq_data.split(":")[1]
                             answer_callback(token_cbq, cbq_id, "✅ فعال شد")
+                            web_pin_su = f"{secrets.randbelow(1000000):06d}"
                             d_apr_su = load_alerts()
                             found_su = False
                             for u in d_apr_su.get("users", []):
                                 if str(u.get("chat_id","")) == target_cid_su:
                                     u["approved"] = True
+                                    u["web_pin"] = web_pin_su
                                     found_su = True
                                     break
                             if not found_su:
-                                d_apr_su.setdefault("users",[]).append({"chat_id": target_cid_su, "username": "", "joined_at": now_pretty(), "custom_name": "", "approved": True})
+                                d_apr_su.setdefault("users",[]).append({"chat_id": target_cid_su, "username": "", "joined_at": now_pretty(), "custom_name": "", "approved": True, "web_pin": web_pin_su})
                             save_alerts(d_apr_su)
                             try:
                                 requests.post(f"https://api.telegram.org/bot{token_cbq}/editMessageReplyMarkup",
@@ -2321,7 +2344,9 @@ def _do_update(upd, token):
                             send_tg(token_cbq, cbq_cid, f"✅ عضو <code>{target_cid_su}</code> تایید و فعال شد.")
                             send_tg(token_cbq, target_cid_su,
                                 "🎉 <b>درخواست شما تایید شد!</b>\n\n"
-                                "یکبار /start بزنید تا منو به‌روز شود. ✅")
+                                "یکبار /start بزنید تا منو به‌روز شود. ✅\n\n"
+                                f"🔑 کد فعال‌سازی سایت شما: <code>{web_pin_su}</code>\n"
+                                "برای ثبت آلارم از طریق سایت، این کد رو یک‌بار توی سایت (دکمه «🔑 کد فعال‌سازی» زیر نام کاربری) وارد کن.")
 
                     elif cbq_data.startswith("reject_signup:"):
                         if cbq_cid != YOUR_CHAT_ID:
@@ -3652,6 +3677,20 @@ def _do_update(upd, token):
                         save_alerts(data)
                     is_adm = (cid == YOUR_CHAT_ID)
                     if existing_name:
+                        # کاربر قدیمی که هنوز کد فعال‌سازی سایت (web_pin) نداره —
+                        # الان که وارد شده، یه بار براش می‌سازیم تا دیگه کسی نتونه با تایپ کردن اسمش تو سایت جاش بزنه
+                        if existing_user and not existing_user.get("web_pin"):
+                            new_pin_old = f"{secrets.randbelow(1000000):06d}"
+                            for u in users:
+                                if str(u.get("chat_id","")) == cid:
+                                    u["web_pin"] = new_pin_old
+                                    break
+                            data["users"] = users
+                            save_alerts(data)
+                            send_tg(token, cid,
+                                f"🔑 <b>کد فعال‌سازی سایت شما:</b> <code>{new_pin_old}</code>\n\n"
+                                "برای جلوگیری از سوءاستفاده‌ی افراد دیگه از اسمت، این کد رو یک‌بار توی سایت "
+                                "(دکمه «🔑 کد فعال‌سازی» زیر نام کاربری) وارد کن.")
                         # کاربر قبلاً اسم داده — مستقیم به منو برو
                         show_main_menu(token, cid,
                             f"👋 خوش برگشتی <b>{existing_name}</b>!\n\nاز منوی زیر انتخاب کن 👇",
@@ -5305,8 +5344,11 @@ def add_alert():
     sym = body.get("symbol","").upper().strip()
     atype = body.get("type","forex")
     tgt = float(body.get("target_price", 0))
-    cur = get_price(sym, atype) if (atype!="forex" or is_forex_market_open()) else None
     creator = body.get("creator", "").strip()
+    pin = body.get("pin", "").strip()
+    if not _is_name_approved(creator, pin):
+        return jsonify({"ok": False, "error": "این نام هنوز از طرف ادمین تایید نشده. لطفاً ابتدا از طریق ربات تلگرام (/start) درخواست فعال‌سازی بدید."}), 403
+    cur = get_price(sym, atype) if (atype!="forex" or is_forex_market_open()) else None
     a = {
         "id": str(int(time.time() * 1000)), "symbol": sym, "type": atype,
         "target_price": tgt, "condition": body.get("condition","above"),
@@ -5413,6 +5455,10 @@ def instant_alert():
     creator = body.get("creator", "").strip()
     target_price = body.get("target_price")
     only_me = body.get("only_me", False)
+    pin = body.get("pin", "").strip()
+
+    if not _is_name_approved(creator, pin):
+        return jsonify({"ok": False, "error": "این نام هنوز از طرف ادمین تایید نشده. لطفاً ابتدا از طریق ربات تلگرام (/start) درخواست فعال‌سازی بدید."}), 403
 
     token, all_cids, data = _get_token_and_cids()
     if not token:
