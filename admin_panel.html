@@ -454,9 +454,36 @@
           <div class="avatar">${escapeHtml(u.name.slice(0,2))}</div>
           <div><div class="user-name">${escapeHtml(u.name)}</div><div class="user-id">${escapeHtml(u.chat_id)}</div></div>
         </div>
-        <button class="remove-x" onclick="deleteUser('${u.chat_id}', '${escapeHtml(u.name)}')">✕</button>
+        <div style="display:flex; align-items:center; gap:10px;">
+          <div style="display:flex; align-items:center; gap:6px;" title="دیدن کل آلارم‌ها (نه فقط آلارم‌های خودش)">
+            <span style="font-size:11px; color: var(--text-dim);">کل آلارم‌ها</span>
+            <div class="switch${u.full_access ? ' on' : ''}" style="margin-right:0" id="fa-switch-${u.chat_id}" onclick="toggleFullAccess('${u.chat_id}')"></div>
+          </div>
+          <button class="remove-x" onclick="deleteUser('${u.chat_id}', '${escapeHtml(u.name)}')">✕</button>
+        </div>
       </div>
     `).join('');
+  }
+
+  async function toggleFullAccess(chatId){
+    const sw = document.getElementById('fa-switch-'+chatId);
+    const newValue = !sw.classList.contains('on');
+    sw.classList.add('disabled');
+    try{
+      const data = await apiCall('/api/admin-panel/users/'+chatId+'/full-access', {
+        method: 'POST', body: JSON.stringify({value: newValue})
+      });
+      sw.classList.remove('disabled');
+      if (data.ok){
+        sw.classList.toggle('on', !!data.full_access);
+        pulseToast(data.full_access ? 'دسترسی کامل داده شد' : 'دسترسی کامل گرفته شد');
+      } else {
+        pulseToast(data.error || 'خطا', true);
+      }
+    } catch(e){
+      sw.classList.remove('disabled');
+      pulseToast(e.message, true);
+    }
   }
 
   async function deleteUser(chatId, name){

@@ -5334,9 +5334,17 @@ def get_my_alerts():
                 matched_user = usr
                 resolved_cid = str(usr.get("chat_id", ""))
                 break
+    if not matched_user and resolved_cid:
+        for usr in data.get("users", []):
+            if str(usr.get("chat_id", "")) == str(resolved_cid):
+                matched_user = usr
+                break
     if matched_user and matched_user.get("web_pin"):
         if str(pin) != str(matched_user.get("web_pin")):
             return jsonify([])
+    if matched_user and matched_user.get("full_access"):
+        # این کاربر از پنل ادمین دسترسی کامل گرفته — کل آلارم‌ها (عادی + شخصی) رو ببینه
+        return jsonify(all_alerts)
     my = [
         a for a in all_alerts
         if (
@@ -6152,9 +6160,32 @@ def admin_panel_users():
     return jsonify({"ok": True, "users": [
         {"chat_id": str(u.get("chat_id", "")),
          "name": u.get("custom_name", "") or u.get("username", "") or str(u.get("chat_id", "")),
-         "private_access": bool(u.get("private_access"))}
+         "private_access": bool(u.get("private_access")),
+         "full_access": bool(u.get("full_access"))}
         for u in users
     ]})
+
+
+@app.route("/api/admin-panel/users/<chat_id>/full-access", methods=["POST"])
+def admin_panel_set_full_access(chat_id):
+    """فعال/غیرفعال کردن دیدن کل آلارم‌ها (نه فقط آلارم‌های خودش) برای یه کاربر — از پنل وب"""
+    auth_err = _require_admin_session()
+    if auth_err:
+        return auth_err
+    body = request.json or {}
+    value = bool(body.get("value", False))
+    with _alerts_cache_lock:
+        data = load_alerts()
+        found = False
+        for u in data.get("users", []):
+            if str(u.get("chat_id", "")) == str(chat_id):
+                u["full_access"] = value
+                found = True
+                break
+        if not found:
+            return jsonify({"ok": False, "error": "کاربر پیدا نشد"}), 404
+        save_alerts(data)
+    return jsonify({"ok": True, "full_access": value})
 
 
 @app.route("/api/admin-panel/users/<chat_id>", methods=["DELETE"])
