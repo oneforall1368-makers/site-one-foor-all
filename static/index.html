@@ -528,7 +528,7 @@ select option{background:var(--bg3)}
     <div><span class="user-name-label">شما</span> <span class="user-name-value" id="user-name-display">...</span></div>
     <div class="user-edit-icon">✎</div>
   </div>
-  <div style="cursor:pointer;font-size:11px;color:var(--text2);margin:-8px 0 1.2rem 0" onclick="setUserPin()">🔑 کد فعال‌سازی (فقط برای اعضای جدیدی که از تلگرام کد گرفتن)</div>
+  <div style="cursor:pointer;font-size:11px;color:var(--text2);margin:-8px 0 1.2rem 0" onclick="setUserPin()">🔑 کد فعال‌سازی</div>
 
   <div class="tabs">
     <button class="tab on t-my" onclick="switchTab('alerts',this,'all')">⭐ آلارم‌های من</button>
@@ -1097,14 +1097,9 @@ function filterAlerts() {
   if (currentTab === 'alerts') {
     currentSearchAll = document.getElementById('search-input-all').value.toLowerCase();
     currentSortAll = document.getElementById('sort-select-all').value;
-    const currentUser = getUserName();
-    // فقط آلارم‌های خود کاربر (عادی + شخصی/is_private) نمایش داده بشه
-    let filtered = allAlertsData.filter(a => a.active && a.created_by === currentUser);
-    for (const pa of allPrivateData) {
-      if (pa.active && pa.created_by === currentUser && !filtered.find(x => x.id === pa.id)) {
-        filtered.push(pa);
-      }
-    }
+    // آلارم‌های من = دقیقاً همون چیزی که سرور با تطابق اسم+کد برگردونده (allPrivateData)
+    // دیگه از لیست کامل همه‌ی کاربرا فیلتر نمی‌کنیم، چون اون فیلتر فقط سمت مرورگره و قابل دور زدنه
+    let filtered = allPrivateData.filter(a => a.active);
     if (currentSearchAll) {
       filtered = filtered.filter(a => 
         a.symbol.toLowerCase().includes(currentSearchAll) || 
@@ -1193,7 +1188,7 @@ async function loadAlerts() {
     // fetch آلارم‌های شخصی — فقط در allPrivateData نگه دار، به allAlertsData اضافه نشه
     const userName = getUserName();
     try {
-      const rMy = await fetch(`${API}/api/alerts/my?name=${encodeURIComponent(userName)}`);
+      const rMy = await fetch(`${API}/api/alerts/my?name=${encodeURIComponent(userName)}&pin=${encodeURIComponent(getUserPin())}`);
       allPrivateData = await rMy.json();
     } catch { allPrivateData = []; }
 
