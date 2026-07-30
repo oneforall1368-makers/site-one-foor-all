@@ -812,25 +812,36 @@ def _is_weekend_tehran():
 # این شمارش فقط برای false-handling و آمار لحظه‌ای استفاده می‌شه، نه برای تصمیم تقسیم
 _active_assign_count: dict = {}
 
-# { member_name: count_of_alarms_received_today } — معیار اصلی تقسیم عادلانه.
+# { member_name: count_of_alarms_received_this_week } — معیار اصلی تقسیم عادلانه.
 # هر آلارمی که به کسی داده بشه (چه فعال بمونه چه بعداً false بشه) اینجا شمرده می‌شه
-# و تا نیمه‌شب تهران صفر نمی‌شه. این یعنی کسی که همین الان false کرده، دیگه
-# «صفر» حساب نمی‌شه صرفاً چون آلارمش تموم شده — باید صبر کنه تا نوبت واقعی‌ش بشه.
+# و تا شنبه‌ی هفته‌ی بعد صفر نمی‌شه. این یعنی کسی که همین الان false کرده، دیگه
+# «صفر» حساب نمی‌شه صرفاً چون آلارمش تموم شده — باید صبر کنه تا نوبت واقعی‌ش بشه،
+# و اگه یه روز آلارم کمی گیرش اومد، بقیه‌ی هفته جبران می‌شه.
 _daily_assign_count: dict = {}
-_daily_assign_date: str = ""  # تاریخ (YYYY-MM-DD تهران) که شمارش روزانه برای اون معتبره
+_daily_assign_date: str = ""  # کلید هفته (تاریخ شنبه‌ی همون هفته) که شمارش هفتگی براش معتبره
 _daily_assign_lock = threading.Lock()
 
 def _tehran_today_str() -> str:
     return datetime.now(TEHRAN).strftime("%Y-%m-%d")
 
+def _tehran_week_start_str() -> str:
+    """تاریخ شنبه‌یِ همین هفته (شروع هفته‌ی ایرانی) به‌عنوان کلید شمارش هفتگی"""
+    now = datetime.now(TEHRAN)
+    days_since_saturday = (now.weekday() - 5) % 7  # weekday(): دوشنبه=0 ... شنبه=5
+    week_start = now - timedelta(days=days_since_saturday)
+    return week_start.strftime("%Y-%m-%d")
+
 def _ensure_daily_reset():
-    """اگه روز عوض شده، شمارش روزانه رو صفر کن"""
+    """شمارشِ عادلانه دیگه روزانه نیست، هفتگیه: اگه هفته عوض شده (رسیدیم به شنبه‌ی جدید)
+    شمارش صفر می‌شه. تا وقتی هفته عوض نشده، شمارش تجمیعی می‌مونه — همین باعث می‌شه
+    کسی که یه روز سبک (آلارم کم) گیرش اومده، بقیه‌ی هفته جبران بشه و در کل هفته
+    تقریباً به تعداد مساوی با بقیه آلارم بگیره."""
     global _daily_assign_count, _daily_assign_date
-    today = _tehran_today_str()
+    week_key = _tehran_week_start_str()
     with _daily_assign_lock:
-        if _daily_assign_date != today:
+        if _daily_assign_date != week_key:
             _daily_assign_count = {}
-            _daily_assign_date = today
+            _daily_assign_date = week_key
 
 def _bump_daily_count(name: str):
     _ensure_daily_reset()
@@ -843,8 +854,8 @@ def _get_daily_counts(members: list) -> dict:
         return {m: _daily_assign_count.get(m, 0) for m in members}
 
 def _rebuild_daily_assign_count():
-    """بعد از ری‌استارت، شمارش روزانه رو از Supabase بازسازی کن — بدون این
-    کار، بعد از هر دیپلوی عدالت روزانه از صفر شروع می‌شد و بی‌معنی می‌شد."""
+    """بعد از ری‌استارت، شمارش هفتگی رو از Supabase بازسازی کن — بدون این
+    کار، بعد از هر دیپلوی عدالتِ هفتگی از صفر شروع می‌شد و بی‌معنی می‌شد."""
     global _daily_assign_count, _daily_assign_date
     rows = _sb_load_today_assignments()
     counts = {}
@@ -854,8 +865,8 @@ def _rebuild_daily_assign_count():
             counts[name] = counts.get(name, 0) + 1
     with _daily_assign_lock:
         _daily_assign_count = counts
-        _daily_assign_date = _tehran_today_str()
-    print(f"[assign] daily counts بازسازی شد: {counts}")
+        _daily_assign_date = _tehran_week_start_str()
+    print(f"[assign] شمارش هفتگی بازسازی شد: {counts}")
 
 # جلوگیری از double-handover: startup و scheduler هر کدوم فقط یه بار اجرا کنن
 # جلوگیری از race condition در /False — اگه یه آلارم داره false میشه، دیگران صبر کنن
@@ -955,21 +966,23 @@ def _sb_load_active_assignments():
 
 def _sb_load_today_assignments():
     """
-    لود همه assignment‌هایی که امروز (از نیمه‌شب تهران) fired_at داشتن —
-    چه الان فعال باشن چه false شده باشن. برای بازسازی شمارش عادلانه‌ی
-    روزانه بعد از ری‌استارت لازمه.
+    لود همه assignment‌هایی که از شنبه‌ی همین هفته (نیمه‌شب تهران) تا الان
+    fired_at داشتن — چه الان فعال باشن چه false شده باشن. برای بازسازی
+    شمارش عادلانه‌ی هفتگی بعد از ری‌استارت لازمه.
     """
     if not SUPABASE_KEY: return []
     try:
-        today_start = datetime.now(TEHRAN).replace(hour=0, minute=0, second=0, microsecond=0)
-        today_start_str = today_start.strftime("%Y-%m-%d %H:%M:%S")
+        now = datetime.now(TEHRAN)
+        days_since_saturday = (now.weekday() - 5) % 7
+        week_start = (now - timedelta(days=days_since_saturday)).replace(hour=0, minute=0, second=0, microsecond=0)
+        week_start_str = week_start.strftime("%Y-%m-%d %H:%M:%S")
         r = requests.get(
-            f"{SUPABASE_URL}/rest/v1/alarm_assignments?fired_at=gte.{today_start_str}&select=assigned_to,fired_at",
+            f"{SUPABASE_URL}/rest/v1/alarm_assignments?fired_at=gte.{week_start_str}&select=assigned_to,fired_at",
             headers=_sb_h(), timeout=10)
         if r.status_code == 200:
             return r.json()
     except Exception as e:
-        print(f"[assign] load today exc: {e}")
+        print(f"[assign] load week exc: {e}")
     return []
 
 def _rebuild_active_assign_count(rows):
@@ -986,18 +999,20 @@ def _rebuild_active_assign_count(rows):
 
 def _pick_assignee(members: list) -> str:
     """
-    تقسیم عادلانه‌ی روزانه: کسی که امروز (از نیمه‌شب تهران) کمترین آلارم
-    دریافت کرده انتخاب می‌شه — نه کسی که الان کمترین آلارم فعال داره.
+    تقسیم عادلانه‌ی هفتگی: کسی که این هفته (از شنبه، نیمه‌شب تهران) کمترین
+    آلارم دریافت کرده انتخاب می‌شه — نه کسی که الان کمترین آلارم فعال داره.
     این یعنی وقتی کسی false می‌کنه، فوراً دوباره «صفر» حساب نمی‌شه؛ باید صبر
-    کنه تا واقعاً نوبتش با بقیه‌ی اعضا برابر بشه.
+    کنه تا واقعاً نوبتش با بقیه‌ی اعضا برابر بشه. همچنین چون شمارش تا آخر
+    هفته صفر نمی‌شه، اگه یه روز کم‌کار بود بقیه‌ی هفته جبران می‌شه و در کل
+    هفته هرکس تقریباً به تعداد بقیه آلارم می‌گیره.
 
-    تای‌بریک: اگه چند نفر شمارش روزانه‌شون مساوی بود، اول بین کسایی که
+    تای‌بریک: اگه چند نفر شمارش هفتگی‌شون مساوی بود، اول بین کسایی که
     همین الان هیچ آلارم فعالی ندارن انتخاب می‌شه (نه رندوم کامل بین همه‌ی
     هم‌سطح‌ها) — تا آلارم به کسی که واقعاً بی‌کاره برسه، نه کسی که فقط
-    شانسی شمارش روزانه‌ش با بقیه برابره ولی همین الان مشغوله.
+    شانسی شمارش هفتگی‌ش با بقیه برابره ولی همین الان مشغوله.
 
     آلارم هیچ‌وقت بی‌صاحب نمی‌مونه: اگه همه مشغول باشن (هرکدوم حداقل یه
-    آلارم فعال دارن)، بازم بین کسایی که کمترین شمارش روزانه رو دارن تقسیم
+    آلارم فعال دارن)، بازم بین کسایی که کمترین شمارش هفتگی رو دارن تقسیم
     می‌شه — فقط دیگه محدودیت زمانی/بازه اعمال نمی‌شه.
 
     استثنا: عضو DEPRIORITIZED_MEMBER تا حد امکان کنار گذاشته می‌شه —
@@ -5334,17 +5349,9 @@ def get_my_alerts():
                 matched_user = usr
                 resolved_cid = str(usr.get("chat_id", ""))
                 break
-    if not matched_user and resolved_cid:
-        for usr in data.get("users", []):
-            if str(usr.get("chat_id", "")) == str(resolved_cid):
-                matched_user = usr
-                break
     if matched_user and matched_user.get("web_pin"):
         if str(pin) != str(matched_user.get("web_pin")):
             return jsonify([])
-    if matched_user and matched_user.get("full_access"):
-        # این کاربر از پنل ادمین دسترسی کامل گرفته — کل آلارم‌ها (عادی + شخصی) رو ببینه
-        return jsonify(all_alerts)
     my = [
         a for a in all_alerts
         if (
@@ -6160,32 +6167,9 @@ def admin_panel_users():
     return jsonify({"ok": True, "users": [
         {"chat_id": str(u.get("chat_id", "")),
          "name": u.get("custom_name", "") or u.get("username", "") or str(u.get("chat_id", "")),
-         "private_access": bool(u.get("private_access")),
-         "full_access": bool(u.get("full_access"))}
+         "private_access": bool(u.get("private_access"))}
         for u in users
     ]})
-
-
-@app.route("/api/admin-panel/users/<chat_id>/full-access", methods=["POST"])
-def admin_panel_set_full_access(chat_id):
-    """فعال/غیرفعال کردن دیدن کل آلارم‌ها (نه فقط آلارم‌های خودش) برای یه کاربر — از پنل وب"""
-    auth_err = _require_admin_session()
-    if auth_err:
-        return auth_err
-    body = request.json or {}
-    value = bool(body.get("value", False))
-    with _alerts_cache_lock:
-        data = load_alerts()
-        found = False
-        for u in data.get("users", []):
-            if str(u.get("chat_id", "")) == str(chat_id):
-                u["full_access"] = value
-                found = True
-                break
-        if not found:
-            return jsonify({"ok": False, "error": "کاربر پیدا نشد"}), 404
-        save_alerts(data)
-    return jsonify({"ok": True, "full_access": value})
 
 
 @app.route("/api/admin-panel/users/<chat_id>", methods=["DELETE"])
