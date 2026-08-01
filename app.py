@@ -999,21 +999,15 @@ def _rebuild_active_assign_count(rows):
 
 def _pick_assignee(members: list) -> str:
     """
-    تقسیم عادلانه‌ی هفتگی: کسی که این هفته (از شنبه، نیمه‌شب تهران) کمترین
-    آلارم دریافت کرده انتخاب می‌شه — نه کسی که الان کمترین آلارم فعال داره.
-    این یعنی وقتی کسی false می‌کنه، فوراً دوباره «صفر» حساب نمی‌شه؛ باید صبر
-    کنه تا واقعاً نوبتش با بقیه‌ی اعضا برابر بشه. همچنین چون شمارش تا آخر
-    هفته صفر نمی‌شه، اگه یه روز کم‌کار بود بقیه‌ی هفته جبران می‌شه و در کل
-    هفته هرکس تقریباً به تعداد بقیه آلارم می‌گیره.
+    اولویت اصلی: کسی که همین الان هیچ آلارم فعالی نداره (idle) — یعنی به
+    کسی که یه آلارم دستشه، آلارم دوم نمی‌دیم مگر این‌که همه مشغول باشن و
+    مجبور باشیم. بین idle ها، کسی که این هفته (از شنبه، نیمه‌شب تهران)
+    کمترین آلارم دریافت کرده انتخاب می‌شه — تا هم کسی دوتا نگیره وقتی یکی
+    دیگه بی‌کاره، هم در کل هفته شمارش‌ها تقریباً برابر بمونه. اگه یه روز
+    کم‌کار بود، بقیه‌ی هفته (وقتی idle باشه) جبران می‌شه.
 
-    تای‌بریک: اگه چند نفر شمارش هفتگی‌شون مساوی بود، اول بین کسایی که
-    همین الان هیچ آلارم فعالی ندارن انتخاب می‌شه (نه رندوم کامل بین همه‌ی
-    هم‌سطح‌ها) — تا آلارم به کسی که واقعاً بی‌کاره برسه، نه کسی که فقط
-    شانسی شمارش هفتگی‌ش با بقیه برابره ولی همین الان مشغوله.
-
-    آلارم هیچ‌وقت بی‌صاحب نمی‌مونه: اگه همه مشغول باشن (هرکدوم حداقل یه
-    آلارم فعال دارن)، بازم بین کسایی که کمترین شمارش هفتگی رو دارن تقسیم
-    می‌شه — فقط دیگه محدودیت زمانی/بازه اعمال نمی‌شه.
+    اگه همه مشغول باشن (هیچ‌کس idle نیست)، آلارم بی‌صاحب نمی‌مونه —
+    بین کسایی که کمترین شمارش هفتگی رو دارن (حتی اگه مشغولن) تقسیم می‌شه.
 
     استثنا: عضو DEPRIORITIZED_MEMBER تا حد امکان کنار گذاشته می‌شه —
     فقط وقتی انتخاب می‌شه که واقعاً نوبتش شده. تو بازه‌ی
@@ -1034,16 +1028,21 @@ def _pick_assignee(members: list) -> str:
 
     def _choose_among(pool: list) -> str:
         """
-        از بین pool، اول بر اساس کمترین شمارش روزانه فیلتر کن. اگه چند نفر
-        مساوی بودن، تای‌بریک دوم: بین اونایی که الان صفر آلارم فعال دارن
-        انتخاب کن (تا آلارم به کسی که همین الان بی‌کاره برسه، نه کسی که
-        شانسی هم‌سطح روزانه‌ست ولی الان مشغوله). اگه بازم مساوی بودن، رندوم.
+        اول بین کسایی که همین الان هیچ آلارم فعالی ندارن (idle) انتخاب کن —
+        حتی اگه شمارش هفتگی‌شون از یکی که مشغوله بیشتر باشه. یعنی به کسی که
+        همین الان یه آلارم دستشه، یه آلارم دومی نمی‌دیم مگر این‌که واقعاً
+        مجبور باشیم (همه مشغول باشن). بین idle ها هم، کسی که شمارش هفتگی‌ش
+        کمتره اولویت داره تا عدالت هفتگی هم رعایت بشه.
         """
+        idle = [m for m in pool if active_counts[m] == 0]
+        if idle:
+            min_daily_idle = min(daily_counts[m] for m in idle)
+            tied_idle = [m for m in idle if daily_counts[m] == min_daily_idle]
+            return random.choice(tied_idle)
+        # همه مشغولن — مجبوریم؛ بین کمترین شمارش هفتگی انتخاب کن
         min_daily = min(daily_counts[m] for m in pool)
         tied = [m for m in pool if daily_counts[m] == min_daily]
-        idle = [m for m in tied if active_counts[m] == 0]
-        final_pool = idle if idle else tied
-        return random.choice(final_pool)
+        return random.choice(tied)
 
     # اگه اولویت پایین مسعود از پنل خاموش شده باشه، دیگه استثنا قائل نشو —
     # دقیقاً مثل بقیه‌ی اعضا وارد چرخه‌ی عادلانه‌ی خالص می‌شه
@@ -5349,9 +5348,17 @@ def get_my_alerts():
                 matched_user = usr
                 resolved_cid = str(usr.get("chat_id", ""))
                 break
+    if not matched_user and resolved_cid:
+        for usr in data.get("users", []):
+            if str(usr.get("chat_id", "")) == str(resolved_cid):
+                matched_user = usr
+                break
     if matched_user and matched_user.get("web_pin"):
         if str(pin) != str(matched_user.get("web_pin")):
             return jsonify([])
+    if matched_user and matched_user.get("full_access"):
+        # این کاربر از پنل ادمین دسترسی کامل گرفته — کل آلارم‌ها (عادی + شخصی) رو ببینه
+        return jsonify(all_alerts)
     my = [
         a for a in all_alerts
         if (
@@ -6167,9 +6174,32 @@ def admin_panel_users():
     return jsonify({"ok": True, "users": [
         {"chat_id": str(u.get("chat_id", "")),
          "name": u.get("custom_name", "") or u.get("username", "") or str(u.get("chat_id", "")),
-         "private_access": bool(u.get("private_access"))}
+         "private_access": bool(u.get("private_access")),
+         "full_access": bool(u.get("full_access"))}
         for u in users
     ]})
+
+
+@app.route("/api/admin-panel/users/<chat_id>/full-access", methods=["POST"])
+def admin_panel_set_full_access(chat_id):
+    """فعال/غیرفعال کردن دیدن کل آلارم‌ها (نه فقط آلارم‌های خودش) برای یه کاربر — از پنل وب"""
+    auth_err = _require_admin_session()
+    if auth_err:
+        return auth_err
+    body = request.json or {}
+    value = bool(body.get("value", False))
+    with _alerts_cache_lock:
+        data = load_alerts()
+        found = False
+        for u in data.get("users", []):
+            if str(u.get("chat_id", "")) == str(chat_id):
+                u["full_access"] = value
+                found = True
+                break
+        if not found:
+            return jsonify({"ok": False, "error": "کاربر پیدا نشد"}), 404
+        save_alerts(data)
+    return jsonify({"ok": True, "full_access": value})
 
 
 @app.route("/api/admin-panel/users/<chat_id>", methods=["DELETE"])
