@@ -1847,6 +1847,44 @@ def _is_name_approved(name: str, pin: str = "") -> bool:
     # اسمی که به هیچ کاربر تاییدشده‌ی تلگرام تطابق نداشته باشه (یعنی هنوز از تلگرام تاییدیه نگرفته) — اجازه نداره
     return False
 
+def _verified_user_by_name(name: str, pin: str = ""):
+    """مثل _is_name_approved ولی به‌جای True/False، خودِ رکورد کاربر رو برمی‌گردونه (یا None اگه
+    هویتش تایید نشه). برای جاهایی که بعد از تایید هویت نیاز به فیلدهای دیگه‌ی کاربر
+    (private_access, full_access, chat_id) داریم."""
+    name_lc = (name or "").strip().lower()
+    if not name_lc:
+        return None
+    data = load_alerts()
+    for u in data.get("users", []):
+        un = (u.get("custom_name") or "").strip().lower()
+        if un and un == name_lc:
+            required_pin = u.get("web_pin")
+            if required_pin:
+                if str(pin or "").strip() != str(required_pin):
+                    return None
+                return u
+            if bool(u.get("approved", True)):
+                return u
+            return None
+    return None
+
+
+@app.route("/api/me", methods=["GET"])
+def get_me():
+    """وضعیت یه کاربر (بر اساس اسم+کد) — تا سایت بفهمه کدوم دکمه‌ها (مثلاً آلارم شخصی) رو نشونش بده"""
+    name = request.args.get("name", "").strip()
+    pin = request.args.get("pin", "").strip()
+    u = _verified_user_by_name(name, pin)
+    if not u:
+        return jsonify({"ok": True, "verified": False, "private_access": False, "full_access": False})
+    return jsonify({
+        "ok": True,
+        "verified": True,
+        "private_access": bool(u.get("private_access")),
+        "full_access": bool(u.get("full_access")),
+    })
+
+
 def _get_sender_name(msg):
     """اسم فرستنده — اول custom_name، بعد اسم تلگرام"""
     u = msg.get("from", {})
@@ -5382,13 +5420,23 @@ def add_alert():
     pin = body.get("pin", "").strip()
     if not _is_name_approved(creator, pin):
         return jsonify({"ok": False, "error": "این نام هنوز از طرف ادمین تایید نشده. لطفاً ابتدا از طریق ربات تلگرام (/start) درخواست فعال‌سازی بدید."}), 403
+    # آلارم شخصی فقط برای کسایی که از پنل ادمین/تلگرام دسترسیش رو گرفتن — وگرنه سایلنت عادی ثبت می‌شه
+    is_private = False
+    private_cid = None
+    if bool(body.get("is_private", False)):
+        u_priv = _verified_user_by_name(creator, pin)
+        if u_priv and u_priv.get("private_access"):
+            is_private = True
+            private_cid = str(u_priv.get("chat_id", ""))
     cur = get_price(sym, atype) if (atype!="forex" or is_forex_market_open()) else None
     a = {
         "id": str(int(time.time() * 1000)), "symbol": sym, "type": atype,
         "target_price": tgt, "condition": body.get("condition","above"),
         "comment": body.get("comment","").strip(), "active": True,
         "created_by": creator or "ناشناس",
-        "notify_only": None,
+        "is_private": is_private,
+        "private_cid": private_cid,
+        "notify_only": private_cid,
         "last_price": cur, "last_checked": now_teh() if cur else None,
         "created_at": now_teh()
     }
@@ -5399,6 +5447,42 @@ def add_alert():
         data["alerts"].append(a)
         save_alerts(data)
     return jsonify({"ok": True, "alert": a})
+
+@app.route("/api/alarm-assignments/<aid>/false", methods=["POST"])
+def web_false_assignment(aid):
+    """فالس کردن یه آلارم مشخص از صفحه‌ی گزارش هفتگی وب (با کامنت/علت) — نیاز به اسم+کد تاییدشده داره.
+    فقط برای آلارم‌های تیمی (غیرشخصی) کار می‌کنه، دقیقاً مثل چیزی که تو گزارش هفتگی نمایش داده می‌شه."""
+    body = request.json or {}
+    name = (body.get("name") or "").strip()
+    pin = (body.get("pin") or "").strip()
+    reason = (body.get("reason") or "").strip()
+    u = _verified_user_by_name(name, pin)
+    if not u:
+        return jsonify({"ok": False, "error": "هویت تایید نشد. لطفاً اسم و کد فعال‌سازی درست رو وارد کنید."}), 403
+
+    raw = _sb_load_all_alerts()
+    if raw and isinstance(raw, dict):
+        all_alerts_wfa = raw.get("alarms", []) + raw.get("archive", [])
+    else:
+        fb = load_alerts()
+        all_alerts_wfa = fb.get("alarms", []) + fb.get("archive", [])
+    alert_wfa = next((x for x in all_alerts_wfa if str(x.get("id","")) == str(aid)), None)
+    if alert_wfa and alert_wfa.get("is_private"):
+        return jsonify({"ok": False, "error": "این آلارم شخصیه و از این صفحه قابل فالس‌کردن نیست."}), 403
+
+    sender_name = u.get("custom_name") or name
+    with _false_in_progress_lock:
+        if aid in _false_in_progress:
+            return jsonify({"ok": False, "error": "این آلارم همین الان داره پردازش می‌شه، چند ثانیه صبر کنید."}), 409
+        _false_in_progress.add(aid)
+    try:
+        _sb_false_assignment(aid, sender_name, reason)
+        _rebuild_active_assign_count(_sb_load_active_assignments())
+    finally:
+        with _false_in_progress_lock:
+            _false_in_progress.discard(aid)
+    return jsonify({"ok": True})
+
 
 @app.route("/api/alerts/<aid>", methods=["DELETE"])
 def del_alert(aid):
@@ -8166,6 +8250,7 @@ def report_weekly_html():
         dir_zone_label = "ناحیه سل" if cond_html == "above" else ("ناحیه بای" if cond_html == "below" else "")
         candle_cls = "candle-up" if is_buy else "candle-down"
         false_detail = ""
+        false_action = ""
         if not is_active:
             if false_history:
                 hist_items = ""
@@ -8178,6 +8263,11 @@ def report_weekly_html():
                 false_detail = f'<div class="false-detail false-history">{hist_items}</div>'
             else:
                 false_detail = f'<div class="false-detail"><span>🕐 {false_at}</span>{("<span class=reason>"+false_rsn+"</span>") if false_rsn else ""}</div>'
+        else:
+            false_action = f'''<div class="false-action" data-aid="{aid}">
+              <input type="text" class="false-reason-inp" placeholder="علت/کامنت (اختیاری)">
+              <button type="button" class="false-btn" onclick="markFalse('{aid}', this)">❌ فالس کردن</button>
+            </div>'''
         rows_html += f"""
         <div class="card card-{status_cls}" data-search="{(assignee + ' ' + sym + ' ' + tag + ' ' + creator + ' ' + false_by).lower()}" data-falseby="{false_by.lower()}" data-status="{status_cls}">
           <div class="card-num">{idx}</div>
@@ -8203,6 +8293,7 @@ def report_weekly_html():
               <div class="info-cell"><span class="lbl">🙋 مسئول</span><span class="val highlight">{assignee}</span></div>
             </div>
             {false_detail}
+            {false_action}
           </div>
           <div class="card-rail">
             <div class="rail-dot {candle_cls}"></div>
@@ -8383,6 +8474,12 @@ def report_weekly_html():
   .false-detail .reason{{font-style:italic}}
   .false-history{{flex-direction:column;gap:4px}}
   .hist-entry{{display:block;font-size:11px;color:var(--red);padding:2px 0}}
+  .false-action{{margin-top:10px;display:flex;gap:8px;align-items:center}}
+  .false-reason-inp{{flex:1;background:var(--bg2);border:1px solid var(--border);border-radius:8px;padding:8px 10px;font-size:12px;color:var(--text);font-family:inherit}}
+  .false-reason-inp:focus{{outline:none;border-color:var(--red)}}
+  .false-btn{{background:var(--red-dim);color:var(--red);border:1px solid var(--red-border);border-radius:8px;padding:8px 14px;font-size:12px;font-weight:700;cursor:pointer;white-space:nowrap;transition:.15s}}
+  .false-btn:hover{{background:var(--red);color:#fff}}
+  .false-btn:disabled{{opacity:.5;cursor:default}}
 
   /* ── Empty ── */
   .empty{{text-align:center;padding:90px 20px;color:var(--muted);animation:fadeUp .5s ease;position:relative;z-index:1}}
@@ -8447,6 +8544,41 @@ def report_weekly_html():
 </div>
 <div class="footer">آخرین بروزرسانی: {now_dt.strftime('%H:%M — %d/%m/%Y')}</div>
 <script>
+  // فالس کردن یه آلارم مستقیم از همین صفحه (با کامنت اختیاری)
+  async function markFalse(aid, btnEl) {{
+    const wrap = btnEl.closest('.false-action');
+    const reasonInp = wrap ? wrap.querySelector('.false-reason-inp') : null;
+    const reason = reasonInp ? reasonInp.value.trim() : '';
+    let name = localStorage.getItem('trader_name') || '';
+    let pin = localStorage.getItem('trader_pin') || '';
+    if (!name) {{
+      name = prompt('نام شما (همون نامی که تو سایت آلارم استفاده می‌کنید):', '') || '';
+      if (!name) return;
+    }}
+    if (!confirm('این آلارم به عنوان False ثبت بشه؟')) return;
+    btnEl.disabled = true;
+    btnEl.textContent = '⏳ ...';
+    try {{
+      const r = await fetch(`/api/alarm-assignments/${{aid}}/false`, {{
+        method: 'POST',
+        headers: {{'Content-Type': 'application/json'}},
+        body: JSON.stringify({{name, pin, reason}})
+      }});
+      const d = await r.json();
+      if (d.ok) {{
+        location.reload();
+      }} else {{
+        alert('❌ ' + (d.error || 'خطا در ثبت'));
+        btnEl.disabled = false;
+        btnEl.textContent = '❌ فالس کردن';
+      }}
+    }} catch (e) {{
+      alert('❌ خطا در ارتباط با سرور');
+      btnEl.disabled = false;
+      btnEl.textContent = '❌ فالس کردن';
+    }}
+  }}
+
   // miyanbor‌های بازه تاریخ
   function _fmtDate(d) {{
     const y = d.getFullYear(), m = String(d.getMonth()+1).padStart(2,'0'), day = String(d.getDate()).padStart(2,'0');
