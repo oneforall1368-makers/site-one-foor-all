@@ -4463,6 +4463,8 @@ def _do_update(upd, token):
                             if bot_msg_id:
                                 edit_tg_keyboard(token, cid, bot_msg_id,
                                     f"✅ <b>اسم با موفقیت ذخیره شد!</b>\n\nاسم جدید: <b>{new_name}</b>", [])
+
+                    elif step == "sos_symbol":
                         sym_w2 = txt.upper().replace("/","")
                         if len(sym_w2) < 2:
                             if bot_msg_id:
@@ -4480,6 +4482,7 @@ def _do_update(upd, token):
                                          {"text": "📉 SELL", "callback_data": f"sos_dir:{cid}:sell"}],
                                         [{"text": "❌ انصراف", "callback_data": f"flow_cancel:{cid}"}]
                                     ])
+
 
                     elif step == "sos_dir":
                         # این step دیگه از text نمیاد — از callback میاد (sos_dir:cid:buy/sell)
@@ -4860,6 +4863,65 @@ def _load_fired_backup_ids() -> set:
             return set()
     return set()
 
+def _sb_load_active_only():
+    """
+    فقط ردیف‌های فعال (status=active) + ردیف کانفیگ رو از Supabase بخون —
+    بدون آرشیو تاریخی. حلقه‌ی زنده‌ی چک قیمت فقط به آلارم‌های فعال نیاز داره؛
+    آرشیو جدا و فقط وقتی کاربر واقعاً صفحه‌ی بایگانی رو تو سایت باز می‌کنه
+    خونده می‌شه (endpoint /api/archive از قبل مستقیم و بدون کش این کارو می‌کنه).
+    """
+    if not SUPABASE_KEY: return None
+    try:
+        r = requests.get(
+            f"{SUPABASE_URL}/rest/v1/alerts?or=(id.eq.__config__,status.eq.active)&select=*&limit=500",
+            headers=_sb_h(), timeout=10)
+        if r.status_code != 200:
+            print(f"[alerts] load active-only failed: {r.status_code} {r.text[:80]}")
+            return None
+        rows = r.json()
+        if not rows:
+            return None
+        config_row = next((x for x in rows if x["id"] == "__config__"), None)
+        tg = {"bot_token": "", "chat_ids": []}
+        users = []
+        if config_row:
+            tg["bot_token"] = config_row.get("telegram_token","") or ""
+            raw_cids = config_row.get("chat_ids") or []
+            tg["chat_ids"] = raw_cids if isinstance(raw_cids, list) else json.loads(raw_cids)
+            raw_users = config_row.get("users") or []
+            users = raw_users if isinstance(raw_users, list) else json.loads(raw_users)
+        alerts = []
+        for row in rows:
+            if row["id"] == "__config__": continue
+            if row.get("status") != "active" or not row.get("active"):
+                continue
+            alerts.append({
+                "id":           row["id"],
+                "symbol":       row.get("symbol",""),
+                "type":         row.get("type","forex"),
+                "condition":    row.get("condition","above"),
+                "target_price": row.get("target_price",0),
+                "created_by":   row.get("created_by",""),
+                "created_at":   row.get("created_at",""),
+                "comment":      row.get("comment",""),
+                "is_private":   row.get("is_private", False),
+                "private_cid":  row.get("private_cid") or row.get("notify_only"),
+                "notify_only":  row.get("notify_only"),
+                "active":       row.get("active", True),
+                "last_price":   row.get("last_price"),
+                "last_checked": row.get("last_checked"),
+                "fired_at":     row.get("fired_at"),
+                "fired_price":  row.get("fired_price"),
+            })
+        data = {"alerts": alerts, "archive": [], "telegram": tg,
+                "users": users, "errors": [], "last_update": now_teh()}
+        print(f"[alerts] Loaded ACTIVE-ONLY from Supabase — {len(alerts)} active (بدون آرشیو)")
+        return data
+    except Exception as e:
+        print(f"[alerts] load active-only error: {e}")
+        return None
+
+
 def check_alerts():
     global _loop_count
     while True:
@@ -4867,7 +4929,15 @@ def check_alerts():
             _loop_count += 1
             global _cache_alerts
             with _alerts_cache_lock:
-                _cache_alerts = None
+                # قبلاً هر ۶۰ ثانیه، بدون قید و شرط، کل جدول alerts (شامل کل آرشیو
+                # تاریخی) از Supabase دوباره دانلود می‌شد — همین باعث مصرف egress
+                # بی‌رویه بود. الان فقط هر ۵ دور (~۵ دقیقه) یه‌بار رفرش واقعی از
+                # Supabase می‌گیریم، و اونم فقط ردیف‌های فعال (بدون آرشیو) —
+                # بقیه‌ی دورها از کش حافظه استفاده می‌کنیم که با هر save_alerts()
+                # (از هر بخش دیگه‌ی برنامه) خودش به‌روز می‌مونه.
+                if _loop_count % 5 == 1:
+                    fresh = _sb_load_active_only()
+                    _cache_alerts = fresh if fresh is not None else None
                 token, cids, data = _get_token_and_cids()
             _fired_backup_ids = _load_fired_backup_ids()
             active = [a for a in data.get("alerts", [])
@@ -4875,7 +4945,6 @@ def check_alerts():
                       and not a.get("fired_at")
                       and str(a["id"]) not in _fired_backup_ids]
             if not active:
-                save_alerts(data)
                 time.sleep(60)
                 continue
             forex_open = is_forex_market_open()
