@@ -170,6 +170,37 @@ def _sb_save_deprioritize_masoud(value: bool):
     except Exception as e:
         print(f"[assign] save deprioritize_masoud exc: {e}")
 
+def _sb_load_unavailable_members() -> list:
+    """اسم اعضایی که موقتاً از چرخه‌ی تقسیم آلارم کنار گذاشته شدن (مرخصی/غیره) —
+    پیش‌فرض لیست خالی (یعنی همه در دسترسن) اگه چیزی پیدا نشد. نیازمند یه ستون
+    jsonb به اسم unavailable_members روی ردیف __config__ جدول alerts."""
+    if not SUPABASE_KEY:
+        return []
+    try:
+        r = requests.get(
+            f"{SUPABASE_URL}/rest/v1/alerts?id=eq.__config__&select=unavailable_members",
+            headers=_sb_h(), timeout=8)
+        if r.status_code == 200:
+            rows = r.json()
+            if rows and rows[0].get("unavailable_members") is not None:
+                val = rows[0]["unavailable_members"]
+                return val if isinstance(val, list) else json.loads(val)
+    except Exception as e:
+        print(f"[assign] load unavailable_members exc: {e}")
+    return []
+
+def _sb_save_unavailable_members(members: list):
+    """فقط همین یک فیلد رو patch می‌کنه — با upsert_config تداخل نداره"""
+    if not SUPABASE_KEY:
+        return
+    try:
+        requests.patch(
+            f"{SUPABASE_URL}/rest/v1/alerts?id=eq.__config__",
+            headers={**_sb_h(), "Prefer": "return=minimal"},
+            json={"unavailable_members": members}, timeout=8)
+    except Exception as e:
+        print(f"[assign] save unavailable_members exc: {e}")
+
 def _sb_load_all_alerts():
     """همه ردیف‌های جدول alerts رو بخون و به فرمت داخلی تبدیل کن"""
     if not SUPABASE_KEY: return None
@@ -308,8 +339,15 @@ def save_alert_fired(a):
         _local_mark_fired_backup(a)
     except Exception as e:
         print(f"[alerts] local fired backup error: {e}")
-    # cache رو پاک کن تا دفعه بعد از Supabase بخونه و archive آپدیت بشه
-    _cache_alerts = None
+    # به‌جای پاک کردن کامل کش (که باعث یه fetch کامل و پرهزینه‌ی بعدی از
+    # Supabase می‌شد — شامل کل آرشیو تاریخی، و از هر جای برنامه‌ای که بعدش
+    # load_alerts() صدا بزنه، حتی poll_telegram که تقریباً پیوسته در حال اجراست)،
+    # مستقیم خودِ کش حافظه رو اصلاح می‌کنیم: این آلارم از فعال به آرشیو منتقل
+    # می‌شه، بدون این‌که نیاز به خوندن دوباره از Supabase باشه.
+    with _alerts_cache_lock:
+        if _cache_alerts is not None:
+            _cache_alerts["alerts"] = [x for x in _cache_alerts.get("alerts", []) if x.get("id") != a.get("id")]
+            _cache_alerts.setdefault("archive", []).append(a)
 
 def _sb_upsert_alert_retry(a, max_tries=3):
     """
@@ -769,6 +807,25 @@ def _set_deprioritize_masoud(value: bool):
         _deprioritize_masoud_active = value
     _sb_save_deprioritize_masoud(value)
 
+# اسم اعضایی که موقتاً از چرخه‌ی تقسیم آلارم کنار گذاشته شدن (مرخصی/غیره).
+# پیش‌فرض خالی (همه در دسترس) تا رفتار فعلی حفظ بشه.
+_unavailable_members: set = set()
+_unavailable_members_lock = threading.Lock()
+
+def _get_unavailable_members() -> set:
+    with _unavailable_members_lock:
+        return set(_unavailable_members)
+
+def _set_member_availability(name: str, available: bool):
+    global _unavailable_members
+    with _unavailable_members_lock:
+        if available:
+            _unavailable_members.discard(name)
+        else:
+            _unavailable_members.add(name)
+        snapshot = sorted(_unavailable_members)
+    _sb_save_unavailable_members(snapshot)
+
 # =====================================================================
 # 🌐 پنل ادمین وب — /admin-panel
 # =====================================================================
@@ -1083,8 +1140,13 @@ def _get_assignee_for_alarm(alarm_id: str, alarm_tag: str, fired_at: str,
     """
     مسئول آلارم رو بین کل اعضای تیم به‌صورت رندومِ عادلانه تعیین کن —
     مستقل از ساعت/شیفت. هر آلارم تیمی همیشه یه مسئول می‌گیره.
+    اعضایی که از پنل ادمین موقتاً «غیرفعال» (مرخصی/در دسترس نیستن) شدن،
+    از این چرخه کنار گذاشته می‌شن — مگر این‌که همه غیرفعال باشن (اون موقع
+    برای این‌که آلارم بی‌صاحب نمونه، بین کل اعضا تقسیم می‌شه).
     """
-    assignee = _pick_assignee(TEAM_MEMBERS)
+    unavailable = _get_unavailable_members()
+    pool = [m for m in TEAM_MEMBERS if m not in unavailable] or TEAM_MEMBERS
+    assignee = _pick_assignee(pool)
     threading.Thread(
         target=_sb_save_assignment,
         args=(alarm_id, alarm_tag, assignee, "", fired_at),
@@ -1101,14 +1163,17 @@ def _sb_restore_on_startup():
     تا تقسیم رندومِ عادلانه بدون از دست دادن state ادامه پیدا کنه.
     دیگه هیچ شیفت/handover/scheduler‌ای وجود نداره.
     """
-    global _deprioritize_masoud_active
+    global _deprioritize_masoud_active, _unavailable_members
     rows = _sb_load_active_assignments()
     _rebuild_active_assign_count(rows)
     _rebuild_daily_assign_count()
     with _deprioritize_masoud_lock:
         _deprioritize_masoud_active = _sb_load_deprioritize_masoud()
+    with _unavailable_members_lock:
+        _unavailable_members = set(_sb_load_unavailable_members())
     print(f"[assign] startup: {len(rows)} آلارم active از Supabase بازسازی شد — "
-          f"اولویت پایین مسعود: {'فعال' if _deprioritize_masoud_active else 'غیرفعال'}")
+          f"اولویت پایین مسعود: {'فعال' if _deprioritize_masoud_active else 'غیرفعال'} — "
+          f"غیرفعال‌ها: {sorted(_unavailable_members) or 'هیچ‌کس'}")
 
 
 
@@ -4937,7 +5002,11 @@ def check_alerts():
                 # (از هر بخش دیگه‌ی برنامه) خودش به‌روز می‌مونه.
                 if _loop_count % 5 == 1:
                     fresh = _sb_load_active_only()
-                    _cache_alerts = fresh if fresh is not None else None
+                    if fresh is not None:
+                        _cache_alerts = fresh
+                    # اگه fresh None بود (خطای موقت شبکه/Supabase)، کش قبلی رو دست
+                    # نخورده نگه می‌داریم — نال کردنش باعث می‌شد هر load_alerts()
+                    # بعدی (از هر جای برنامه) مجبور به یه fetch کامل و سنگین بشه.
                 token, cids, data = _get_token_and_cids()
             _fired_backup_ids = _load_fired_backup_ids()
             active = [a for a in data.get("alerts", [])
@@ -6421,6 +6490,33 @@ def admin_panel_set_deprioritize():
     value = bool(body.get("active", True))
     _set_deprioritize_masoud(value)
     return jsonify({"ok": True, "active": value})
+
+
+@app.route("/api/admin-panel/team-availability", methods=["GET"])
+def admin_panel_get_team_availability():
+    """لیست کل اعضای تیم + وضعیت در دسترس بودنشون برای تقسیم آلارم"""
+    auth_err = _require_admin_session()
+    if auth_err:
+        return auth_err
+    unavailable = _get_unavailable_members()
+    return jsonify({"ok": True, "members": [
+        {"name": m, "available": m not in unavailable} for m in TEAM_MEMBERS
+    ]})
+
+
+@app.route("/api/admin-panel/team-availability", methods=["POST"])
+def admin_panel_set_team_availability():
+    """روشن/خاموش کردن دسترسی یه عضو خاص برای گرفتن آلارم جدید (مثلاً مرخصی)"""
+    auth_err = _require_admin_session()
+    if auth_err:
+        return auth_err
+    body = request.json or {}
+    name = (body.get("name") or "").strip()
+    available = bool(body.get("available", True))
+    if name not in TEAM_MEMBERS:
+        return jsonify({"ok": False, "error": "عضو ناشناخته"}), 404
+    _set_member_availability(name, available)
+    return jsonify({"ok": True, "name": name, "available": available})
 
 
 
