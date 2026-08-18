@@ -471,16 +471,28 @@ def save_trade(trade):
             _cache_journal.insert(0, trade)
     _sb_upsert(trade)
 
-def save_journal(journal_list):
+def save_journal(journal_list, dirty_ids=None):
+    """
+    ذخیره‌ی ژورنال. اگه dirty_ids داده بشه، فقط همون تریدهایی که واقعاً
+    عوض شدن به Supabase upsert می‌شن (نه کل لیست) — چون قبلاً هر تغییر
+    کوچیک تو یه معامله (مثلاً از poll_open_trades) باعث می‌شد کل ژورنال
+    (با تمام candle_snapshot هاش) دوباره فرستاده بشه، حتی تریدهایی که هیچ
+    تغییری نکرده بودن. اگه dirty_ids داده نشه (مثل قبل)، همه‌چیز ذخیره می‌شه —
+    برای جاهایی که واقعاً باید کل لیست sync بشه (مثلاً حذف یه ترید).
+    """
     global _cache_journal
     _cache_journal = journal_list
     if not SUPABASE_KEY:
         print("[JOURNAL:SAVE] SUPABASE_KEY نیست")
         return
     try:
-        for trade in journal_list:
+        if dirty_ids is not None:
+            to_save = [t for t in journal_list if t.get("id") in dirty_ids]
+        else:
+            to_save = journal_list
+        for trade in to_save:
             _sb_upsert(trade)
-        print(f"[JOURNAL:SAVE] ✅ {len(journal_list)} ترید در Supabase")
+        print(f"[JOURNAL:SAVE] ✅ {len(to_save)} ترید در Supabase (از {len(journal_list)} کل ژورنال)")
     except Exception as e:
         print(f"[JOURNAL:SAVE] error: {e}")
 
@@ -7790,6 +7802,7 @@ def poll_open_trades():
             # هم open (هنوز TP/SL نخورده) هم watching (TP خورده، منتظر SL/3R برای چارت)
             pending = [t for t in journal if t.get("pending_check") and t.get("status") in ("open", "watching")]
             changed = False
+            dirty_ids = set()
             for trade in pending:
                 sym = trade["sym"]
                 tf = trade.get("tf", "1h")
@@ -7835,6 +7848,7 @@ def poll_open_trades():
                             # exitNote آپدیت، outcome و exit همون TP قبلیه
                             trade["exitNote"] = "خودکار: تارگت — بعد SL خورد (چارت کامل شد)"
                             changed = True
+                            dirty_ids.add(trade.get("id"))
                             print(f"[poll_watching] {sym} SL خورد بعد از TP — چارت بسته شد")
                         elif hit in ("tp3",) or (found_3r or (mfe_pip and sl_price and abs(entry - float(sl_price)) * mul > 0 and mfe_pip >= abs(entry - float(sl_price)) * mul * 3.0)):
                             # 3R زده شد → آپدیت به tp3
@@ -7854,6 +7868,7 @@ def poll_open_trades():
                             if tp3:
                                 trade["exit"] = round(tp3, 5)
                             changed = True
+                            dirty_ids.add(trade.get("id"))
                             print(f"[poll_watching] {sym} 3R زده شد بعد از TP — tp3")
                         else:
                             # هنوز تعیین تکلیف نشده — snapshot و آمار رو آپدیت کن
@@ -7867,6 +7882,7 @@ def poll_open_trades():
                             trade["pullback_after_1r"] = pullback or trade.get("pullback_after_1r", False)
                             trade["last_poll"] = now_teh()
                             changed = True
+                            dirty_ids.add(trade.get("id"))
                     else:
                         # ====== حالت open: هنوز هیچ چیز نخورده ======
                         if hit == "sl":
@@ -7890,6 +7906,7 @@ def poll_open_trades():
                             trade["candle_snapshot"] = merge_snapshot(trade.get("candle_snapshot", []), snapshot_bars)
                             trade["snapshot_locked"] = True
                             changed = True
+                            dirty_ids.add(trade.get("id"))
                             print(f"[poll_open] {sym} SL خورد")
                         elif hit == "tp3":
                             # 3R مستقیم → بسته
@@ -7913,6 +7930,7 @@ def poll_open_trades():
                             trade["candle_snapshot"] = merge_snapshot(trade.get("candle_snapshot", []), snapshot_bars)
                             trade["snapshot_locked"] = True
                             changed = True
+                            dirty_ids.add(trade.get("id"))
                             print(f"[poll_open] {sym} 3R کامل")
                         elif hit == "tp":
                             # TP خورد → برد ثبت، watching
@@ -7936,6 +7954,7 @@ def poll_open_trades():
                             trade["candle_snapshot"] = merge_snapshot(trade.get("candle_snapshot", []), snapshot_bars)
                             trade["last_poll"] = now_teh()
                             changed = True
+                            dirty_ids.add(trade.get("id"))
                             print(f"[poll_open] {sym} TP خورد → watching")
                         else:
                             if not trade.get("snapshot_locked"):
@@ -7947,10 +7966,11 @@ def poll_open_trades():
                             trade["pullback_after_1r"] = pullback or trade.get("pullback_after_1r", False)
                             trade["last_poll"] = now_teh()
                             changed = True
+                            dirty_ids.add(trade.get("id"))
                 except Exception as e:
                     log_error(f"[poll_open] {sym}: {e}")
             if changed:
-                save_journal(journal)
+                save_journal(journal, dirty_ids=dirty_ids)
         except Exception as e:
             log_error(f"poll_open_trades: {e}")
         time.sleep(900)
