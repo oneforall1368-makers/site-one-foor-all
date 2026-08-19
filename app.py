@@ -3118,14 +3118,18 @@ def _do_update(upd, token):
                         answer_callback(token_cbq, cbq_id, "⏳ در حال بارگذاری...")
                         tl_cid = cbq_data.split(":", 1)[1]
                         rows_tl_all = _sb_load_active_assignments()
-                        # فقط آلارم‌های تیمی — active + archive بدون کش
-                        _raw_tl = _sb_load_all_alerts()
-                        if _raw_tl and isinstance(_raw_tl, dict):
-                            all_alerts_tl = _raw_tl.get("alarms", []) + _raw_tl.get("archive", [])
-                        else:
-                            _fb_tl = load_alerts()
-                            all_alerts_tl = _fb_tl.get("alarms", []) + _fb_tl.get("archive", [])
-                        private_ids = {str(a["id"]) for a in all_alerts_tl if a.get("is_private")}
+                        # فقط آلارم‌های تیمی — فقط is_private رو برای همون IDهای لازم چک کن (نه کل جدول)
+                        tl_ids = sorted({str(r.get("id","")) for r in rows_tl_all if r.get("id")})
+                        private_ids = set()
+                        if SUPABASE_KEY and tl_ids:
+                            try:
+                                r_tl = requests.get(
+                                    f"{SUPABASE_URL}/rest/v1/alerts?id=in.({','.join(tl_ids)})&select=id,is_private",
+                                    headers=_sb_h(), timeout=10)
+                                if r_tl.status_code == 200:
+                                    private_ids = {str(x.get("id","")) for x in r_tl.json() if x.get("is_private")}
+                            except Exception as e:
+                                print(f"[trigger_list] targeted fetch error: {e}")
                         rows_tl = [r for r in rows_tl_all if str(r.get("id","")) not in private_ids]
                         my_name_tl = _get_user_custom_name(tl_cid) or ""
                         if not rows_tl:
@@ -3214,15 +3218,21 @@ def _do_update(upd, token):
                                     rows_wr = r_wr.json()
                             except Exception as e:
                                 print(f"[weekly] load exc: {e}")
-                        # لود همه آلارم‌ها — active + archive
-                        _raw_wr = _sb_load_all_alerts()
-                        if _raw_wr and isinstance(_raw_wr, dict):
-                            all_alerts_wr = _raw_wr.get("alarms", []) + _raw_wr.get("archive", [])
-                        else:
-                            _fb = load_alerts()
-                            all_alerts_wr = _fb.get("alarms", []) + _fb.get("archive", [])
+                        # لود فقط alertهایی که تو این بازه‌ی هفته هستن (نه کل جدول)
+                        wr_ids = sorted({str(r.get("id","")) for r in rows_wr if r.get("id")})
+                        alerts_by_id_wr = {}
+                        if SUPABASE_KEY and wr_ids:
+                            try:
+                                r_wr2 = requests.get(
+                                    f"{SUPABASE_URL}/rest/v1/alerts?id=in.({','.join(wr_ids)})&select=*",
+                                    headers=_sb_h(), timeout=10)
+                                if r_wr2.status_code == 200:
+                                    for row_wr in r_wr2.json():
+                                        alerts_by_id_wr[str(row_wr.get("id",""))] = row_wr
+                            except Exception as e:
+                                print(f"[weekly] targeted alerts fetch error: {e}")
+                        all_alerts_wr = list(alerts_by_id_wr.values())
                         private_ids_wr = {str(a["id"]) for a in all_alerts_wr if a.get("is_private")}
-                        alerts_by_id_wr = {str(a["id"]): a for a in all_alerts_wr}
                         rows_wr = [r for r in rows_wr if str(r.get("id","")) not in private_ids_wr]
                         # صفحه‌بندی
                         total = len(rows_wr)
@@ -3727,13 +3737,20 @@ def _do_update(upd, token):
                         except Exception as e:
                             print(f"[weekly_search] load exc: {e}")
 
-                    _raw_ws = _sb_load_all_alerts()
-                    if _raw_ws and isinstance(_raw_ws, dict):
-                        all_alerts_ws = _raw_ws.get("alarms", []) + _raw_ws.get("archive", [])
-                    else:
-                        _fb_ws = load_alerts()
-                        all_alerts_ws = _fb_ws.get("alarms", []) + _fb_ws.get("archive", [])
-                    alerts_by_id_ws = {str(a["id"]): a for a in all_alerts_ws}
+                    # لود فقط alertهایی که تو این بازه‌ی هفته هستن (نه کل جدول)
+                    ws_ids = sorted({str(r.get("id","")) for r in rows_ws if r.get("id")})
+                    alerts_by_id_ws = {}
+                    if SUPABASE_KEY and ws_ids:
+                        try:
+                            r_ws2 = requests.get(
+                                f"{SUPABASE_URL}/rest/v1/alerts?id=in.({','.join(ws_ids)})&select=*",
+                                headers=_sb_h(), timeout=10)
+                            if r_ws2.status_code == 200:
+                                for row_ws in r_ws2.json():
+                                    alerts_by_id_ws[str(row_ws.get("id",""))] = row_ws
+                        except Exception as e:
+                            print(f"[weekly_search] targeted alerts fetch error: {e}")
+                    all_alerts_ws = list(alerts_by_id_ws.values())
                     private_ids_ws = {str(a["id"]) for a in all_alerts_ws if a.get("is_private")}
                     rows_ws = [r for r in rows_ws if str(r.get("id","")) not in private_ids_ws]
 
