@@ -4793,6 +4793,10 @@ def _do_update(upd, token):
 notified = set()
 _deleted_ids: set = set()  # آلارم‌هایی که پاک شدن — دیگه fire نشن
 _loop_count = 0
+# حلقه‌ی live price هر ۲ دقیقه یک بار اجرا می‌شود.
+CHECK_INTERVAL_SECONDS = 120
+# refresh آلارم‌های فعال از Supabase هر ۵ دور = حدود ۱۰ دقیقه یک بار.
+ACTIVE_REFRESH_EVERY_LOOPS = 5
 
 _price_fetch_executor = ThreadPoolExecutor(max_workers=8, thread_name_prefix="price_fetch")
 PRICE_FETCH_TIMEOUT = 15  # ثانیه — اگه یه API بیشتر از این طول کشید، skip میشه
@@ -4830,7 +4834,7 @@ def _sb_load_active_only():
     if not SUPABASE_KEY: return None
     try:
         r = requests.get(
-            f"{SUPABASE_URL}/rest/v1/alerts?or=(id.eq.__config__,status.eq.active)&select=*&limit=500",
+            f"{SUPABASE_URL}/rest/v1/alerts?or=(id.eq.__config__,status.eq.active)&select=id,status,active,symbol,type,condition,target_price,created_by,created_at,comment,is_private,private_cid,notify_only,last_price,last_checked,fired_at,fired_price,telegram_token,chat_ids,users&limit=500",
             headers=_sb_h(), timeout=10)
         if r.status_code != 200:
             print(f"[alerts] load active-only failed: {r.status_code} {r.text[:80]}")
@@ -4886,13 +4890,11 @@ def check_alerts():
             _loop_count += 1
             global _cache_alerts
             with _alerts_cache_lock:
-                # قبلاً هر ۶۰ ثانیه، بدون قید و شرط، کل جدول alerts (شامل کل آرشیو
-                # تاریخی) از Supabase دوباره دانلود می‌شد — همین باعث مصرف egress
-                # بی‌رویه بود. الان فقط هر ۵ دور (~۵ دقیقه) یه‌بار رفرش واقعی از
-                # Supabase می‌گیریم، و اونم فقط ردیف‌های فعال (بدون آرشیو) —
-                # بقیه‌ی دورها از کش حافظه استفاده می‌کنیم که با هر save_alerts()
-                # (از هر بخش دیگه‌ی برنامه) خودش به‌روز می‌مونه.
-                if _loop_count % 5 == 1:
+                # حلقه‌ی چک قیمت هر ۲ دقیقه اجرا می‌شود. برای کم کردن Egress،
+                # خودِ Supabase را فقط هر ۵ دور (حدود ۱۰ دقیقه) برای آلارم‌های فعال refresh می‌کنیم.
+                # بین این refreshها از cache حافظه استفاده می‌شود. ثبت/حذف آلارم از
+                # endpointهای خودش cache را به‌روز می‌کند، بنابراین نیاز به fetch مداوم نیست.
+                if _loop_count % ACTIVE_REFRESH_EVERY_LOOPS == 1:
                     fresh = _sb_load_active_only()
                     if fresh is not None:
                         _cache_alerts = fresh
@@ -4906,7 +4908,7 @@ def check_alerts():
                       and not a.get("fired_at")
                       and str(a["id"]) not in _fired_backup_ids]
             if not active:
-                time.sleep(60)
+                time.sleep(CHECK_INTERVAL_SECONDS)
                 continue
             forex_open = is_forex_market_open()
             due_forex, due_crypto = [], []
@@ -5043,16 +5045,20 @@ def check_alerts():
                             _fired_msg_ids[a["id"]] = fired_cid_to_mid
                             threading.Thread(target=_sb_save_fired_msgs, args=(a["id"], fired_cid_to_mid), daemon=True).start()
             if fired:
-                arch = data.get("archive", [])
-                for fid in fired:
-                    obj = next((x for x in data["alerts"] if x["id"] == fid), None)
-                    if obj: arch.append(obj)
-                data["archive"] = arch
-                data["alerts"] = [x for x in data["alerts"] if x["id"] not in fired]
-            save_alerts(data)
+                # save_alert_fired() برای هر آلارم Fired شده، وضعیت نهایی را مستقیم
+                # در Supabase ذخیره و cache را هم به‌روز کرده است. بنابراین اینجا
+                # نباید save_alerts(data) را اجرا کنیم؛ چون آن تابع همه‌ی آلارم‌های
+                # فعال باقی‌مانده را دوباره Upsert می‌کرد و Egress/Write بی‌دلیل می‌ساخت.
+                with _alerts_cache_lock:
+                    if _cache_alerts is not None:
+                        # cache را از data هم همگام نگه می‌داریم، بدون هیچ درخواست شبکه‌ای
+                        data = _cache_alerts
+            # مهم: وقتی هیچ آلارمی fire نشده، هیچ Write به Supabase انجام نمی‌شود.
+            # last_price و last_checked فقط در RAM تغییر می‌کنند و برای مقایسه‌ی
+            # قیمت فعلی با target استفاده می‌شوند.
         except Exception as e:
             log_error(f"check_alerts: {e}")
-        time.sleep(60)
+        time.sleep(CHECK_INTERVAL_SECONDS)
 
 def fmt_price(p, sym=""):
     if p is None: return "—"
