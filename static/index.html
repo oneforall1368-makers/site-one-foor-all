@@ -520,7 +520,6 @@ select option{background:var(--bg3)}
 
   <div class="stats">
     <div class="scard"><div class="scard-lbl">آلارم فعال</div><div class="scard-val green" id="sc-alerts">0</div><div class="scard-sub" id="sc-alerts-sub">—</div></div>
-    <div class="scard"><div class="scard-lbl">بایگانی</div><div class="scard-val gold" id="sc-arch">0</div><div class="scard-sub">فعال‌شده</div></div>
     <div class="scard"><div class="scard-lbl">سیگنال</div><div class="scard-val" style="color:#00e5ff" id="sc-signals">0</div><div class="scard-sub">صادرشده</div></div>
   </div>
 
@@ -532,7 +531,6 @@ select option{background:var(--bg3)}
 
   <div class="tabs">
     <button class="tab on t-my" onclick="switchTab('alerts',this,'all')">⭐ آلارم‌های من</button>
-    <button class="tab t-arch" onclick="switchTab('archive',this,'')">📦 بایگانی</button>
     <button class="tab t-sig" onclick="switchTab('signals',this,'')">📡 سیگنال</button>
     <a class="tab" href="/report/weekly" target="_blank" rel="noopener" style="text-decoration:none;display:flex;align-items:center;justify-content:center">📊 آنالیز هفتگی</a>
   </div>
@@ -560,6 +558,7 @@ select option{background:var(--bg3)}
             <input type="hidden" id="adir" value="below">
           </div>
           <div class="fld"><label>یادداشت (اختیاری)</label><input type="text" id="acmt" placeholder="سطح کلیدی..."></div>
+          <div class="fld"><label>انقضا (روز — خالی = بدون انقضا)</label><input type="number" id="aexp" placeholder="مثلاً 3" min="1" step="1" dir="ltr"></div>
           <div class="fld" id="private-fld" style="display:none">
             <label style="display:flex;align-items:center;gap:6px;cursor:pointer">
               <input type="checkbox" id="private-chk" style="width:16px;height:16px">
@@ -587,14 +586,6 @@ select option{background:var(--bg3)}
       </div>
       <div id="cards-container-all" class="cards-grid"></div>
       <div class="err-log" id="err-log"><div class="err-log-ttl">⚠ خطاهای اخیر</div><div id="err-items"></div></div>
-    </div>
-  </div>
-
-  <!-- ARCHIVE PANEL -->
-  <div class="pnl" id="pnl-archive">
-    <div class="sec">
-      <div class="sec-hd"><div class="sec-ttl"><span class="sec-dot gold"></span>آلارم‌های فعال‌شده</div><button class="btn btn-sm btn-red" onclick="clearArchive()">🗑 پاک کردن</button></div>
-      <div class="sec-bd" id="arch-body"><div class="empty"><div class="empty-ico">◎</div><p>بایگانی خالی است</p></div></div>
     </div>
   </div>
 
@@ -853,7 +844,6 @@ function switchTab(id, el) {
   el.classList.add('on');
   document.getElementById('pnl-' + id).classList.add('on');
   currentTab = id === 'alerts' ? 'alerts' : (id === 'myalerts' ? 'myalerts' : id);
-  if (id === 'archive') loadArchive();
   if (id === 'signals') { loadSignals(); buildSignalPreview(); }
   if (id === 'alerts' || id === 'myalerts') { 
     loadViewMode(id === 'alerts' ? 'all' : 'my');
@@ -922,6 +912,7 @@ async function addAlert() {
   const target_price = parseFloat(document.getElementById('tprice').value);
   const condition = document.getElementById('adir').value;
   const comment = document.getElementById('acmt').value.trim();
+  const expire_days = document.getElementById('aexp').value.trim();
   const creator = getUserName();
   const pin = getUserPin();
   const is_private = document.getElementById('private-chk').checked;
@@ -932,7 +923,7 @@ async function addAlert() {
   const r = await fetch(`${API}/api/alerts`, {
     method: 'POST',
     headers: {'Content-Type': 'application/json'},
-    body: JSON.stringify({symbol, type, target_price, condition, comment, creator, pin, is_private})
+    body: JSON.stringify({symbol, type, target_price, condition, comment, creator, pin, is_private, expire_days})
   });
   const d = await r.json();
   btn.textContent = '+ افزودن'; btn.disabled = false;
@@ -941,6 +932,7 @@ async function addAlert() {
     document.getElementById('sym').value = '';
     document.getElementById('tprice').value = '';
     document.getElementById('acmt').value = '';
+    document.getElementById('aexp').value = '';
     document.getElementById('private-chk').checked = false;
     await loadAlerts();
   } else toast(`❌ ${d.error || 'خطا در ثبت آلارم'}`);
@@ -1188,9 +1180,7 @@ function renderAlertsToContainer(alerts, containerId, viewMode) {
 }
 
 async function deleteAlert(id) { if (!confirm('آلارم حذف شود؟')) return; await fetch(`${API}/api/alerts/${id}`, {method:'DELETE'}); toast('🗑 حذف شد'); loadAlerts(); }
-async function loadArchive() { try { const r = await fetch(`${API}/api/archive`); const items = await r.json(); document.getElementById('sc-arch').textContent = items.length; const body = document.getElementById('arch-body'); if (!items.length) { body.innerHTML = '<div class="empty"><div class="empty-ico">◎</div><p>بایگانی خالی است</p></div>'; return; } body.innerHTML = items.slice().reverse().map(a => { const ts = new Date(a.fired_at || a.created_at); const tStr = ts.toLocaleString('fa-IR', {timeZone:'Asia/Tehran'}); const cmt = a.comment ? `<div class="arch-cmt">💬 ${a.comment}</div>` : ''; return `<div class="arch-row"><span class="arch-tag">✓ فعال شد</span><div><div class="arch-name">${a.symbol}</div><div class="arch-detail">${a.condition==='above'?'↑':'↓'} هدف: $${fmt(a.target_price,a.symbol)} · فعال‌سازی: $${fmt(a.fired_price,a.symbol)}</div><div class="arch-detail">${tStr}</div>${cmt}</div><button class="btn btn-sm btn-red" onclick="delArchItem('${a.id}')">✕</button></div>`; }).join(''); } catch {} }
-async function clearArchive() { if (!confirm('بایگانی پاک شود؟')) return; await fetch(`${API}/api/archive`, {method:'DELETE'}); toast('پاک شد'); loadArchive(); }
-async function delArchItem(id) { await fetch(`${API}/api/archive/${id}`, {method:'DELETE'}); loadArchive(); }
+
 async function loadUsers() { try { const r = await fetch(`${API}/api/users`); const users = await r.json(); document.getElementById('sc-users').textContent = users.length; const body = document.getElementById('users-body'); if (!users.length) { body.innerHTML = '<div class="empty"><div class="empty-ico">👥</div><p>هنوز کاربری /start نزده</p></div>'; return; } body.innerHTML = users.map(u => `<div class="user-row"><div class="user-av">👤</div><div><div class="user-name">${u.username || 'کاربر'}</div><div class="user-id">ID: ${u.chat_id}</div></div><span class="user-date">${(u.joined_at||'').slice(0,10)}</span></div>`).join(''); } catch {} }
 
 let _forexOpen = true;
