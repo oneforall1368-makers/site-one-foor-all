@@ -71,7 +71,7 @@ def _sb_upsert_alert(a):
             "type":         a.get("type","forex"),
             "condition":    a.get("condition","above"),
             "target_price": float(a.get("target_price",0)),
-            "status":       "fired" if a.get("fired_at") else ("active" if a.get("active") else "cancelled"),
+            "status":       "expired" if a.get("expired_at") else ("fired" if a.get("fired_at") else ("active" if a.get("active") else "cancelled")),
             "created_by":   a.get("created_by",""),
             "created_at":   a.get("created_at", now_teh()),
             "comment":      a.get("comment",""),
@@ -88,6 +88,10 @@ def _sb_upsert_alert(a):
             payload["tag"] = a["tag"]
         if a.get("private_cid") is not None:
             payload["private_cid"] = str(a["private_cid"]) if a["private_cid"] else None
+        if a.get("expires_at") is not None:
+            payload["expires_at"] = a["expires_at"]
+        if a.get("expired_at") is not None:
+            payload["expired_at"] = a["expired_at"]
 
         r = requests.post(
             f"{SUPABASE_URL}/rest/v1/alerts",
@@ -318,6 +322,23 @@ def save_alerts(data):
             for a in alerts:
                 _sb_upsert_alert(a)
         threading.Thread(target=_bg, daemon=True).start()
+
+def save_alert_expired(a):
+    """
+    وقتی آلارم منقضی می‌شه (تاریخ انقضاش رسیده و فایر نشده) — به‌جای حذف کامل
+    از دیتابیس، فقط با status='expired' علامت‌گذاری می‌شه (دقیقاً مثل fired،
+    ولی با یه وضعیت جدا). یعنی رکوردش برای همیشه تو Supabase می‌مونه و با SQL
+    قابل خروجی گرفتنه، فقط دیگه تو لیست «آلارم‌های فعال» و چک قیمت نیست.
+    """
+    global _cache_alerts
+    a["expired_at"] = now_teh()
+    a["active"] = False
+    ok = _sb_upsert_alert_retry(a, max_tries=3)
+    if not ok:
+        print(f"[alerts] ⚠️ expired state برای {a.get('id')} تو Supabase ذخیره نشد!")
+    with _alerts_cache_lock:
+        if _cache_alerts is not None:
+            _cache_alerts["alerts"] = [x for x in _cache_alerts.get("alerts", []) if x.get("id") != a.get("id")]
 
 def save_alert_fired(a):
     """
@@ -3513,45 +3534,75 @@ def _do_update(upd, token):
                             [[{"text": "❌ انصراف", "callback_data": f"flow_cancel:{ad_cid}"}]])
 
                     elif cbq_data.startswith("alarm_submit:"):
-                        # ثبت آلارم بدون یادداشت از طریق دکمه inline
+                        # «ثبت بدون یادداشت» — بعدش هنوز باید مدت اعتبار انتخاب بشه
                         as_cid = cbq_data.split(":", 1)[1]
                         pend_as = _pending_alarm.get(as_cid)
                         if not pend_as or pend_as.get("step") != "alarm_comment":
                             answer_callback(token_cbq, cbq_id, "⚠️ جلسه منقضی شد — دوباره شروع کن")
                             return
+                        answer_callback(token_cbq, cbq_id, "")
+                        pend_as["data"]["comment"] = ""
+                        pend_as["step"] = "alarm_expiry"
+                        edit_tg_keyboard(token_cbq, cbq_cid, cbq_msg_id,
+                            f"🔔 <b>{pend_as['data'].get('symbol','')}</b>\n\n⏳ این آلارم چند روز معتبر باشه؟ (اگه تا اون موقع فایر نشه، خودکار حذف می‌شه)",
+                            [
+                                [{"text": "۱ روز", "callback_data": f"alarm_expiry:{as_cid}:1"},
+                                 {"text": "۳ روز", "callback_data": f"alarm_expiry:{as_cid}:3"},
+                                 {"text": "۷ روز", "callback_data": f"alarm_expiry:{as_cid}:7"}],
+                                [{"text": "♾ بدون انقضا", "callback_data": f"alarm_expiry:{as_cid}:0"}],
+                                [{"text": "❌ انصراف", "callback_data": f"flow_cancel:{as_cid}"}]
+                            ])
+
+                    elif cbq_data.startswith("alarm_expiry:"):
+                        # مرحله‌ی آخر — انتخاب مدت اعتبار، و ثبت نهایی آلارم
+                        parts_ae = cbq_data.split(":", 2)
+                        ae_cid = parts_ae[1] if len(parts_ae) > 1 else cbq_cid
+                        ae_days = int(parts_ae[2]) if len(parts_ae) > 2 and parts_ae[2].isdigit() else 0
+                        pend_ae = _pending_alarm.get(ae_cid)
+                        if not pend_ae or pend_ae.get("step") != "alarm_expiry":
+                            answer_callback(token_cbq, cbq_id, "⚠️ جلسه منقضی شد — دوباره شروع کن")
+                            return
                         answer_callback(token_cbq, cbq_id, "⏳ در حال ثبت...")
-                        dw_as = pend_as["data"]
-                        as_uname = cbq.get("from",{}).get("username","") or cbq.get("from",{}).get("first_name","")
-                        is_private_as = dw_as.get("ptype","public") == "private"
-                        sender_as = _get_user_custom_name(as_cid) or as_uname
-                        sym_as = dw_as["symbol"]
-                        atype_as = dw_as["atype"]
-                        new_alert_as = {
+                        dw_ae = pend_ae["data"]
+                        ae_uname = cbq.get("from",{}).get("username","") or cbq.get("from",{}).get("first_name","")
+                        is_private_ae = dw_ae.get("ptype","public") == "private"
+                        sender_ae = _get_user_custom_name(ae_cid) or ae_uname
+                        sym_ae = dw_ae["symbol"]
+                        atype_ae = dw_ae["atype"]
+                        comment_ae = dw_ae.get("comment","")
+                        expires_at_ae = None
+                        if ae_days > 0:
+                            expires_at_ae = (datetime.now(TEHRAN) + timedelta(days=ae_days)).strftime("%Y-%m-%d %H:%M:%S")
+                        new_alert_ae = {
                             "id": str(int(time.time()*1000)),
-                            "symbol": sym_as, "type": atype_as,
-                            "target_price": dw_as["target_price"], "condition": dw_as["condition"],
-                            "comment": "", "created_by": sender_as,
+                            "symbol": sym_ae, "type": atype_ae,
+                            "target_price": dw_ae["target_price"], "condition": dw_ae["condition"],
+                            "comment": comment_ae, "created_by": sender_ae,
                             "active": True, "last_price": None, "last_checked": None,
                             "created_at": now_teh(),
-                            "is_private": is_private_as,
-                            "private_cid": as_cid if is_private_as else None,
-                            "notify_only": as_cid if is_private_as else (YOUR_CHAT_ID if not BROADCAST_MODE else None)
+                            "expires_at": expires_at_ae,
+                            "is_private": is_private_ae,
+                            "private_cid": ae_cid if is_private_ae else None,
+                            "notify_only": ae_cid if is_private_ae else (YOUR_CHAT_ID if not BROADCAST_MODE else None)
                         }
-                        d_as = load_alerts()
-                        d_as["alerts"].append(new_alert_as)
-                        _sb_upsert_alert(new_alert_as)
-                        _cache_alerts = d_as
-                        del _pending_alarm[as_cid]
-                        dir_lbl_as = "📈 BUY" if new_alert_as["condition"] == "below" else "📉 SELL"
-                        priv_lbl_as = "  🔒 شخصی" if is_private_as else "  🌐 تیمی"
-                        confirm_as = (
+                        d_ae = load_alerts()
+                        d_ae["alerts"].append(new_alert_ae)
+                        _sb_upsert_alert(new_alert_ae)
+                        _cache_alerts = d_ae
+                        del _pending_alarm[ae_cid]
+                        dir_lbl_ae = "📈 BUY" if new_alert_ae["condition"] == "below" else "📉 SELL"
+                        priv_lbl_ae = "  🔒 شخصی" if is_private_ae else "  🌐 تیمی"
+                        expiry_lbl_ae = f"\n⏳ اعتبار: {ae_days} روز (تا {expires_at_ae[:10]})" if expires_at_ae else "\n♾ بدون انقضا"
+                        confirm_ae = (
                             f"✅ <b>آلارم ثبت شد!</b>\n\n"
-                            f"💰 <b>{sym_as}</b>  {dir_lbl_as}{priv_lbl_as}\n"
-                            f"🎯 هدف: <code>{fmt_price(new_alert_as['target_price'], sym_as)}</code>\n"
-                            f"\n⏰ {now_teh()} (تهران)"
+                            f"💰 <b>{sym_ae}</b>  {dir_lbl_ae}{priv_lbl_ae}\n"
+                            f"🎯 هدف: <code>{fmt_price(new_alert_ae['target_price'], sym_ae)}</code>\n"
+                            + (f"💬 {comment_ae}\n" if comment_ae else "")
+                            + expiry_lbl_ae
+                            + f"\n\n⏰ {now_teh()} (تهران)"
                         )
-                        edit_tg_keyboard(token_cbq, cbq_cid, cbq_msg_id, confirm_as, [])
-                        def _bg_as(alert=new_alert_as, s=sym_as, t=atype_as):
+                        edit_tg_keyboard(token_cbq, cbq_cid, cbq_msg_id, confirm_ae, [])
+                        def _bg_ae(alert=new_alert_ae, s=sym_ae, t=atype_ae):
                             try:
                                 cur = get_price(s, t)
                                 if cur:
@@ -3559,7 +3610,7 @@ def _do_update(upd, token):
                                     alert["last_checked"] = now_teh()
                                     _sb_upsert_alert(alert)
                             except: pass
-                        threading.Thread(target=_bg_as, daemon=True).start()
+                        threading.Thread(target=_bg_ae, daemon=True).start()
 
                     elif cbq_data.startswith("sos_dir:"):
                         # sos_dir:cid:buy|sell
@@ -4353,47 +4404,30 @@ def _do_update(upd, token):
 
                     elif step == "alarm_comment":
                         comment_w = "" if txt in ("✅ ثبت بدون یادداشت", "✅ ثبت") else txt
-                        is_private_w = dw.get("ptype","public") == "private"
-                        sender_name_w = _get_user_custom_name(cid) or uname
-                        sym_f = dw["symbol"]
-                        atype_f = dw["atype"]
-                        new_alert_w = {
-                            "id": str(int(time.time()*1000)),
-                            "symbol": sym_f, "type": atype_f,
-                            "target_price": dw["target_price"], "condition": dw["condition"],
-                            "comment": comment_w, "created_by": sender_name_w,
-                            "active": True, "last_price": None, "last_checked": None,
-                            "created_at": now_teh(),
-                            "is_private": is_private_w,
-                            "private_cid": cid if is_private_w else None,
-                            "notify_only": cid if is_private_w else (YOUR_CHAT_ID if not BROADCAST_MODE else None)
-                        }
-                        d2 = load_alerts()
-                        d2["alerts"].append(new_alert_w)
-                        _sb_upsert_alert(new_alert_w)
-                        _cache_alerts = d2
-                        del _pending_alarm[cid]
-                        dir_lbl_f = "📈 BUY" if new_alert_w["condition"] == "below" else "📉 SELL"
-                        priv_lbl_f = "  🔒 شخصی" if is_private_w else "  🌐 تیمی"
-                        confirm_txt_f = (
-                            f"✅ <b>آلارم ثبت شد!</b>\n\n"
-                            f"💰 <b>{sym_f}</b>  {dir_lbl_f}{priv_lbl_f}\n"
-                            f"🎯 هدف: <code>{fmt_price(new_alert_w['target_price'], sym_f)}</code>\n"
-                            + (f"💬 {comment_w}\n" if comment_w else "")
-                            + f"\n⏰ {now_teh()} (تهران)"
-                        )
-                        # ادیت پیام اصلی به تأیید نهایی — هیچ پیام جدیدی فرستاده نمیشه
+                        dw["comment"] = comment_w
+                        _pending_alarm[cid]["step"] = "alarm_expiry"
                         if bot_msg_id:
-                            edit_tg_keyboard(token, cid, bot_msg_id, confirm_txt_f, [])
-                        def _bgw(alert=new_alert_w, s=sym_f, t=atype_f):
-                            try:
-                                cur = get_price(s, t)
-                                if cur:
-                                    alert["last_price"] = cur
-                                    alert["last_checked"] = now_teh()
-                                    _sb_upsert_alert(alert)
-                            except: pass
-                        threading.Thread(target=_bgw, daemon=True).start()
+                            edit_tg_keyboard(token, cid, bot_msg_id,
+                                f"🔔 <b>{dw['symbol']}</b>\n\n⏳ این آلارم چند روز معتبر باشه؟ (اگه تا اون موقع فایر نشه، خودکار حذف می‌شه)",
+                                [
+                                    [{"text": "۱ روز", "callback_data": f"alarm_expiry:{cid}:1"},
+                                     {"text": "۳ روز", "callback_data": f"alarm_expiry:{cid}:3"},
+                                     {"text": "۷ روز", "callback_data": f"alarm_expiry:{cid}:7"}],
+                                    [{"text": "♾ بدون انقضا", "callback_data": f"alarm_expiry:{cid}:0"}],
+                                    [{"text": "❌ انصراف", "callback_data": f"flow_cancel:{cid}"}]
+                                ])
+
+                    elif step == "alarm_expiry":
+                        if bot_msg_id:
+                            edit_tg_keyboard(token, cid, bot_msg_id,
+                                f"🔔 <b>{dw.get('symbol','')}</b>\n\nلطفاً از دکمه‌های زیر مدت اعتبار رو انتخاب کن:",
+                                [
+                                    [{"text": "۱ روز", "callback_data": f"alarm_expiry:{cid}:1"},
+                                     {"text": "۳ روز", "callback_data": f"alarm_expiry:{cid}:3"},
+                                     {"text": "۷ روز", "callback_data": f"alarm_expiry:{cid}:7"}],
+                                    [{"text": "♾ بدون انقضا", "callback_data": f"alarm_expiry:{cid}:0"}],
+                                    [{"text": "❌ انصراف", "callback_data": f"flow_cancel:{cid}"}]
+                                ])
 
                     elif step == "edit_name_input":
                         new_name = txt.strip()
@@ -4834,7 +4868,7 @@ def _sb_load_active_only():
     if not SUPABASE_KEY: return None
     try:
         r = requests.get(
-            f"{SUPABASE_URL}/rest/v1/alerts?or=(id.eq.__config__,status.eq.active)&select=id,status,active,symbol,type,condition,target_price,created_by,created_at,comment,is_private,private_cid,notify_only,last_price,last_checked,fired_at,fired_price,telegram_token,chat_ids,users&limit=500",
+            f"{SUPABASE_URL}/rest/v1/alerts?or=(id.eq.__config__,status.eq.active)&select=id,status,active,symbol,type,condition,target_price,created_by,created_at,comment,is_private,private_cid,notify_only,last_price,last_checked,fired_at,fired_price,expires_at,telegram_token,chat_ids,users&limit=500",
             headers=_sb_h(), timeout=10)
         if r.status_code != 200:
             print(f"[alerts] load active-only failed: {r.status_code} {r.text[:80]}")
@@ -4873,6 +4907,7 @@ def _sb_load_active_only():
                 "last_checked": row.get("last_checked"),
                 "fired_at":     row.get("fired_at"),
                 "fired_price":  row.get("fired_price"),
+                "expires_at":   row.get("expires_at"),
             })
         data = {"alerts": alerts, "archive": [], "telegram": tg,
                 "users": users, "errors": [], "last_update": now_teh()}
@@ -4903,10 +4938,30 @@ def check_alerts():
                     # بعدی (از هر جای برنامه) مجبور به یه fetch کامل و سنگین بشه.
                 token, cids, data = _get_token_and_cids()
             _fired_backup_ids = _load_fired_backup_ids()
-            active = [a for a in data.get("alerts", [])
+            all_active_raw = [a for a in data.get("alerts", [])
                       if a.get("active") and str(a["id"]) not in _deleted_ids
                       and not a.get("fired_at")
                       and str(a["id"]) not in _fired_backup_ids]
+
+            # ── چک انقضا — از همون لیستی که همین الان تو حافظه لود شده استفاده می‌کنه،
+            # هیچ خوندن اضافه‌ای از Supabase لازم نداره. فقط وقتی آلارمی واقعاً منقضی
+            # بشه (نادر)، رکوردش با status='expired' علامت‌گذاری می‌شه — نه حذف کامل،
+            # تا همچنان با SQL قابل خروجی گرفتن باشه. ──
+            now_naive_teh = datetime.now(TEHRAN).replace(tzinfo=None)
+            active = []
+            for a in all_active_raw:
+                exp_str = a.get("expires_at")
+                if exp_str:
+                    try:
+                        exp_dt = datetime.strptime(exp_str, "%Y-%m-%d %H:%M:%S")
+                    except Exception:
+                        exp_dt = None
+                    if exp_dt and now_naive_teh >= exp_dt:
+                        _deleted_ids.add(str(a["id"]))
+                        print(f"[expiry] ⌛ {a.get('symbol')} ({a['id']}) منقضی شد — status='expired' می‌شه")
+                        threading.Thread(target=save_alert_expired, args=(a,), daemon=True).start()
+                        continue
+                active.append(a)
             if not active:
                 time.sleep(CHECK_INTERVAL_SECONDS)
                 continue
@@ -5178,6 +5233,14 @@ def add_alert():
             is_private = True
             private_cid = str(u_priv.get("chat_id", ""))
     cur = get_price(sym, atype) if (atype!="forex" or is_forex_market_open()) else None
+    expire_days = body.get("expire_days")
+    expires_at = None
+    try:
+        expire_days = int(expire_days) if expire_days not in (None, "", 0, "0") else 0
+    except (TypeError, ValueError):
+        expire_days = 0
+    if expire_days > 0:
+        expires_at = (datetime.now(TEHRAN) + timedelta(days=expire_days)).strftime("%Y-%m-%d %H:%M:%S")
     a = {
         "id": str(int(time.time() * 1000)), "symbol": sym, "type": atype,
         "target_price": tgt, "condition": body.get("condition","above"),
@@ -5186,6 +5249,7 @@ def add_alert():
         "is_private": is_private,
         "private_cid": private_cid,
         "notify_only": private_cid,
+        "expires_at": expires_at,
         "last_price": cur, "last_checked": now_teh() if cur else None,
         "created_at": now_teh()
     }
