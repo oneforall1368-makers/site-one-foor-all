@@ -6333,7 +6333,7 @@ def report_weekly_html():
 <div class="scroll-bar"><div class="scroll-bar-fill" id="scrollFill"></div></div>
 <div class="scroll-dot" id="scrollDot">📈</div>
 <button class="theme-toggle" id="themeToggle" onclick="toggleTheme()">🌙</button>
-<a href="/report/export" target="_blank" rel="noopener" style="position:fixed;top:16px;left:64px;z-index:50;background:var(--surface,#1a1f2e);border:1px solid var(--border,#2a3142);border-radius:10px;padding:8px 14px;font-size:13px;color:inherit;text-decoration:none;display:flex;align-items:center;gap:6px">📥 دانلود دیتا</a>
+<a href="/report/export?from={from_value}&to={to_value}" target="_blank" rel="noopener" style="position:fixed;top:16px;left:64px;z-index:50;background:var(--surface,#1a1f2e);border:1px solid var(--border,#2a3142);border-radius:10px;padding:8px 14px;font-size:13px;color:inherit;text-decoration:none;display:flex;align-items:center;gap:6px">📥 دانلود دیتا</a>
 <div class="hero">
   <h1>📋 گزارش آلارم‌های تیم</h1>
   <div class="period">{week_label}</div>
@@ -6344,7 +6344,7 @@ def report_weekly_html():
   </div>
 </div>
 <div style="text-align:center;margin:-8px 0 14px">
-  <a href="/report/export" target="_blank" rel="noopener" class="preset-btn" style="text-decoration:none;display:inline-block">📥 دانلود دیتا</a>
+  <a href="/report/export?from={from_value}&to={to_value}" target="_blank" rel="noopener" class="preset-btn" style="text-decoration:none;display:inline-block">📥 دانلود دیتا</a>
 </div>
 <form class="range-nav" id="rangeNav" method="get" action="/report/weekly">
   <div class="range-presets">
@@ -6503,6 +6503,8 @@ def report_export_html():
     )
     today_str = datetime.now(TEHRAN).strftime("%Y-%m-%d")
     month_ago_str = (datetime.now(TEHRAN) - timedelta(days=30)).strftime("%Y-%m-%d")
+    default_from = request.args.get("from", "") or month_ago_str
+    default_to = request.args.get("to", "") or today_str
     html = f"""<!DOCTYPE html>
 <html lang="fa" dir="rtl">
 <head>
@@ -6545,8 +6547,8 @@ def report_export_html():
   <div class="sub">یه بازه و فیلتر انتخاب کن، فایل اکسل (xlsx) دانلود کن.</div>
 
   <div class="row2">
-    <div class="fld"><label>از تاریخ</label><input type="date" id="expFrom" value="{month_ago_str}"></div>
-    <div class="fld"><label>تا تاریخ</label><input type="date" id="expTo" value="{today_str}"></div>
+    <div class="fld"><label>از تاریخ</label><input type="date" id="expFrom" value="{default_from}"></div>
+    <div class="fld"><label>تا تاریخ</label><input type="date" id="expTo" value="{default_to}"></div>
   </div>
 
   <div class="fld">
@@ -6691,17 +6693,21 @@ def report_export_xlsx():
     except Exception as e:
         return jsonify({"ok": False, "error": str(e)}), 500
 
-    # فیلتر نهایی بر اساس فایر/False/منقضی/فعال — چون False یه وضعیتِ خودِ alerts.status نیست
+    # فیلتر نهایی — دقیقا مثل استت‌بار گزارش هفتگی (کل آلارم / فعال / False شده):
+    # «فایرشده» یعنی همه‌ی آلارم‌های فایرشده تو این بازه (چه فعال چه False)،
+    # «فعال» فقط زیرمجموعه‌ی فالس‌نشده، «False شده» فقط زیرمجموعه‌ی فالس‌شده.
     final_rows = []
     for a in rows:
         st = a.get("status", "")
         asg = assignments_map.get(str(a.get("id","")), {})
-        is_false = st == "fired" and asg.get("is_active") is False
-        is_still_active = st == "fired" and not is_false  # فایر شده ولی هنوز فالس نشده
-        if st == "fired" and is_false and want_false:
-            final_rows.append((a, asg, "False شده"))
-        elif is_still_active and (want_fired or want_active):
-            final_rows.append((a, asg, "فعال" if (want_active and not want_fired) else "فایرشده"))
+        if st == "fired":
+            is_false = asg.get("is_active") is False
+            if is_false:
+                if want_fired or want_false:
+                    final_rows.append((a, asg, "False شده"))
+            else:
+                if want_fired or want_active:
+                    final_rows.append((a, asg, "فعال"))
         elif st == "expired" and want_expired:
             final_rows.append((a, asg, "منقضی‌شده"))
 
