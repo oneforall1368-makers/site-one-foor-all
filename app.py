@@ -6646,15 +6646,38 @@ def report_export_xlsx():
     assignments_map = {}  # alert_id -> {assigned_to, is_active, false_by, false_at, false_reason, alarm_tag}
 
     def _fetch_assignments(ids_list=None, assignee_list=None):
-        u = f"{SUPABASE_URL}/rest/v1/alarm_assignments?select=id,assigned_to,is_active,false_by,false_at,false_reason,alarm_tag&limit=5000"
+        base_select = "select=id,assigned_to,is_active,false_by,false_at,false_reason,alarm_tag"
         if ids_list:
-            u += f"&id=in.({','.join(ids_list)})"
-        else:
-            u += f"&fired_at=gte.{range_start_str}&fired_at=lt.{range_end_str}"
-        if assignee_list:
-            u += f"&assigned_to=in.({','.join(assignee_list)})"
-        r = requests.get(u, headers=_sb_h(), timeout=15)
-        return r.json() if r.status_code == 200 else []
+            # چون ممکنه لیست id خیلی طولانی باشه، تکه‌تکه (هر بار ۲۰۰ تا) می‌گیریم
+            out = []
+            ids_list = list(ids_list)
+            for i in range(0, len(ids_list), 200):
+                chunk = ids_list[i:i+200]
+                u = (f"{SUPABASE_URL}/rest/v1/alarm_assignments?{base_select}"
+                     f"&id=in.({','.join(chunk)})&limit={len(chunk)}")
+                r = requests.get(u, headers=_sb_h(), timeout=15)
+                if r.status_code == 200:
+                    out.extend(r.json())
+            return out
+        # حالت بازه‌ای: صفحه‌به‌صفحه همه‌ی رکوردهای این بازه رو می‌گیریم تا چیزی جا نمونه
+        out = []
+        page_size = 1000
+        offset = 0
+        while True:
+            u = (f"{SUPABASE_URL}/rest/v1/alarm_assignments?{base_select}"
+                 f"&fired_at=gte.{range_start_str}&fired_at=lt.{range_end_str}"
+                 f"&order=fired_at.asc&limit={page_size}&offset={offset}")
+            if assignee_list:
+                u += f"&assigned_to=in.({','.join(assignee_list)})"
+            r = requests.get(u, headers=_sb_h(), timeout=15)
+            if r.status_code != 200:
+                break
+            batch = r.json()
+            out.extend(batch)
+            if len(batch) < page_size:
+                break
+            offset += page_size
+        return out
 
     try:
         # دقیقا عین منطق گزارش هفتگی: همیشه از alarm_assignments بر اساس fired_at شروع می‌کنیم،
@@ -6666,13 +6689,17 @@ def report_export_xlsx():
         if not ids:
             rows = []
         else:
-            u2 = f"{SUPABASE_URL}/rest/v1/alerts?id=in.({','.join(ids)})&select=*"
-            if creators:
-                u2 += f"&created_by=in.({','.join(creators)})"
-            if symbols:
-                u2 += f"&symbol=in.({','.join(symbols)})"
-            r2 = requests.get(u2, headers=_sb_h(), timeout=15)
-            rows = r2.json() if r2.status_code == 200 else []
+            rows = []
+            for i in range(0, len(ids), 200):
+                chunk = ids[i:i+200]
+                u2 = f"{SUPABASE_URL}/rest/v1/alerts?id=in.({','.join(chunk)})&select=*&limit={len(chunk)}"
+                if creators:
+                    u2 += f"&created_by=in.({','.join(creators)})"
+                if symbols:
+                    u2 += f"&symbol=in.({','.join(symbols)})"
+                r2 = requests.get(u2, headers=_sb_h(), timeout=15)
+                if r2.status_code == 200:
+                    rows.extend(r2.json())
             rows = [x for x in rows if x.get("id") != "__config__"]
 
         # منقضی‌شده‌ها هیچ‌وقت فایر نشدن، پس تو alarm_assignments نیستن — مستقیم از alerts
