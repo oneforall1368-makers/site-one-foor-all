@@ -6625,9 +6625,6 @@ def report_export_xlsx():
     want_false = want_all or "false" in statuses
     want_expired = want_all or "expired" in statuses
     want_active = want_all or "active" in statuses
-    alert_statuses_needed = set()
-    if want_fired or want_false or want_active: alert_statuses_needed.add("fired")
-    if want_expired: alert_statuses_needed.add("expired")
 
     if not SUPABASE_KEY:
         return jsonify({"ok": False, "error": "Supabase تنظیم نشده"}), 500
@@ -6658,43 +6655,39 @@ def report_export_xlsx():
         return r.json() if r.status_code == 200 else []
 
     try:
-        if assignees:
-            # اول assignmentهای همون مسئول‌ها تو این بازه، بعد alertهای متناظرشون
-            assign_rows = _fetch_assignments(assignee_list=assignees)
-            for x in assign_rows:
-                assignments_map[str(x.get("id",""))] = x
-            ids = sorted(assignments_map.keys())
-            if not ids:
-                rows = []
-            else:
-                u2 = f"{SUPABASE_URL}/rest/v1/alerts?id=in.({','.join(ids)})&select=*"
-                if creators:
-                    u2 += f"&created_by=in.({','.join(creators)})"
-                if symbols:
-                    u2 += f"&symbol=in.({','.join(symbols)})"
-                r2 = requests.get(u2, headers=_sb_h(), timeout=15)
-                rows = r2.json() if r2.status_code == 200 else []
+        # دقیقا عین منطق گزارش هفتگی: همیشه از alarm_assignments بر اساس fired_at شروع می‌کنیم،
+        # بعد alertهای متناظرشون رو می‌گیریم. چه فیلتر مسئول زده باشه چه نه.
+        assign_rows = _fetch_assignments(assignee_list=assignees if assignees else None)
+        for x in assign_rows:
+            assignments_map[str(x.get("id",""))] = x
+        ids = sorted(assignments_map.keys())
+        if not ids:
+            rows = []
         else:
-            if want_all:
-                # هیچ فیلتر وضعیتی زده نشده → بازه‌ی تاریخ باید بر اساس زمان فایر شدن باشه، نه زمان ثبت
-                u = (f"{SUPABASE_URL}/rest/v1/alerts"
-                     f"?fired_at=gte.{range_start_str}&fired_at=lt.{range_end_str}&select=*&limit=5000")
-            else:
-                u = (f"{SUPABASE_URL}/rest/v1/alerts"
-                     f"?created_at=gte.{range_start_str}&created_at=lt.{range_end_str}&select=*&limit=5000")
-            if alert_statuses_needed:
-                u += f"&status=in.({','.join(sorted(alert_statuses_needed))})"
+            u2 = f"{SUPABASE_URL}/rest/v1/alerts?id=in.({','.join(ids)})&select=*"
             if creators:
-                u += f"&created_by=in.({','.join(creators)})"
+                u2 += f"&created_by=in.({','.join(creators)})"
             if symbols:
-                u += f"&symbol=in.({','.join(symbols)})"
-            r = requests.get(u, headers=_sb_h(), timeout=15)
-            rows = r.json() if r.status_code == 200 else []
+                u2 += f"&symbol=in.({','.join(symbols)})"
+            r2 = requests.get(u2, headers=_sb_h(), timeout=15)
+            rows = r2.json() if r2.status_code == 200 else []
             rows = [x for x in rows if x.get("id") != "__config__"]
-            row_ids = sorted({str(x.get("id","")) for x in rows if x.get("id")})
-            if row_ids:
-                for x in _fetch_assignments(ids_list=row_ids):
-                    assignments_map[str(x.get("id",""))] = x
+
+        # منقضی‌شده‌ها هیچ‌وقت فایر نشدن، پس تو alarm_assignments نیستن — مستقیم از alerts
+        # بر اساس همون بازه‌ی expired_at میاریم. (چون آلارم منقضی‌شده مسئول نداره، فقط وقتی
+        # فیلتر مسئول زده نشده اضافه‌شون می‌کنیم.)
+        if want_expired and not assignees:
+            ue = (f"{SUPABASE_URL}/rest/v1/alerts"
+                  f"?expired_at=gte.{range_start_str}&expired_at=lt.{range_end_str}"
+                  f"&status=eq.expired&select=*&limit=5000")
+            if creators:
+                ue += f"&created_by=in.({','.join(creators)})"
+            if symbols:
+                ue += f"&symbol=in.({','.join(symbols)})"
+            re_exp = requests.get(ue, headers=_sb_h(), timeout=15)
+            expired_rows = re_exp.json() if re_exp.status_code == 200 else []
+            existing_ids = {str(x.get("id","")) for x in rows}
+            rows += [x for x in expired_rows if str(x.get("id","")) not in existing_ids]
     except Exception as e:
         return jsonify({"ok": False, "error": str(e)}), 500
 
