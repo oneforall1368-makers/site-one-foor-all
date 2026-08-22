@@ -6772,12 +6772,24 @@ def report_export_xlsx():
     # مرتب‌سازی بر اساس تاریخ فایر (برای منقضی‌شده‌ها که فایر نشدن، بر اساس تاریخ انقضا)
     final_rows.sort(key=lambda item: item[0].get("fired_at") or item[0].get("expired_at") or "")
 
+    def _split_dt(s):
+        """'2026-08-01 10:00:00' یا '2026-08-01T10:00:00' رو به (تاریخ, ساعت) جدا می‌کنه"""
+        s = (s or "").strip()
+        if not s:
+            return "", ""
+        s = s.replace("T", " ")
+        parts = s.split(" ", 1)
+        if len(parts) == 2:
+            return parts[0], parts[1][:8]
+        return parts[0], ""
+
     wb = Workbook()
     ws = wb.active
     ws.title = "آلارم‌ها"
     ws.sheet_view.rightToLeft = True
     headers = ["نماد","هشتک","جهت","قیمت هدف","قیمت فایر","وضعیت","ثبت‌کننده","مسئول",
-               "تاریخ ثبت","تاریخ فایر","علت False","تاریخ False","تاریخ انقضا","خصوصی","کامنت"]
+               "تاریخ ثبت","ساعت ثبت","تاریخ فایر","ساعت فایر","علت False",
+               "تاریخ False","ساعت False","تاریخ انقضا","ساعت انقضا","خصوصی","کامنت"]
     ws.append(headers)
     header_fill = PatternFill("solid", fgColor="1E293B")
     for cell in ws[1]:
@@ -6786,6 +6798,10 @@ def report_export_xlsx():
         cell.alignment = Alignment(horizontal="center")
 
     for a, asg, status_lbl in final_rows:
+        created_d, created_t = _split_dt(a.get("created_at",""))
+        fired_d, fired_t = _split_dt(a.get("fired_at",""))
+        false_d, false_t = _split_dt(asg.get("false_at",""))
+        expired_d, expired_t = _split_dt(a.get("expired_at",""))
         ws.append([
             a.get("symbol",""),
             asg.get("alarm_tag","") or "",
@@ -6795,17 +6811,17 @@ def report_export_xlsx():
             status_lbl,
             a.get("created_by",""),
             asg.get("assigned_to","") or "",
-            a.get("created_at",""),
-            a.get("fired_at","") or "",
+            created_d, created_t,
+            fired_d, fired_t,
             asg.get("false_reason","") or "",
-            asg.get("false_at","") or "",
-            a.get("expired_at","") or "",
+            false_d, false_t,
+            expired_d, expired_t,
             "بله" if a.get("is_private") else "",
             a.get("comment",""),
         ])
 
     from openpyxl.utils import get_column_letter
-    widths = [12,10,7,11,11,11,13,10,17,17,22,17,17,8,26]
+    widths = [12,10,7,11,11,11,13,10,11,9,11,9,22,11,9,11,9,8,26]
     for i, w in enumerate(widths, start=1):
         ws.column_dimensions[get_column_letter(i)].width = w
 
