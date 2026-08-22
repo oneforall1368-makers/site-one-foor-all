@@ -6711,6 +6711,9 @@ def report_export_xlsx():
         elif st == "expired" and want_expired:
             final_rows.append((a, asg, "منقضی‌شده"))
 
+    # مرتب‌سازی بر اساس تاریخ فایر (برای منقضی‌شده‌ها که فایر نشدن، بر اساس تاریخ انقضا)
+    final_rows.sort(key=lambda item: item[0].get("fired_at") or item[0].get("expired_at") or "")
+
     wb = Workbook()
     ws = wb.active
     ws.title = "آلارم‌ها"
