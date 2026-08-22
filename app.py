@@ -6643,10 +6643,10 @@ def report_export_xlsx():
     range_start_str = range_start.strftime("%Y-%m-%dT%H:%M:%S")
     range_end_str = range_end.strftime("%Y-%m-%dT%H:%M:%S")
 
-    assignments_map = {}  # alert_id -> {assigned_to, is_active, false_by, false_at, false_reason}
+    assignments_map = {}  # alert_id -> {assigned_to, is_active, false_by, false_at, false_reason, alarm_tag}
 
     def _fetch_assignments(ids_list=None, assignee_list=None):
-        u = f"{SUPABASE_URL}/rest/v1/alarm_assignments?select=id,assigned_to,is_active,false_by,false_at,false_reason&limit=5000"
+        u = f"{SUPABASE_URL}/rest/v1/alarm_assignments?select=id,assigned_to,is_active,false_by,false_at,false_reason,alarm_tag&limit=5000"
         if ids_list:
             u += f"&id=in.({','.join(ids_list)})"
         else:
@@ -6715,7 +6715,7 @@ def report_export_xlsx():
     ws = wb.active
     ws.title = "آلارم‌ها"
     ws.sheet_view.rightToLeft = True
-    headers = ["نماد","جهت","قیمت هدف","قیمت فایر","وضعیت","ثبت‌کننده","مسئول",
+    headers = ["نماد","هشتک","جهت","قیمت هدف","قیمت فایر","وضعیت","ثبت‌کننده","مسئول",
                "تاریخ ثبت","تاریخ فایر","علت False","تاریخ False","تاریخ انقضا","خصوصی","کامنت"]
     ws.append(headers)
     header_fill = PatternFill("solid", fgColor="1E293B")
@@ -6727,6 +6727,7 @@ def report_export_xlsx():
     for a, asg, status_lbl in final_rows:
         ws.append([
             a.get("symbol",""),
+            asg.get("alarm_tag","") or "",
             "بای" if a.get("condition") == "below" else "سل",
             a.get("target_price",""),
             a.get("fired_price","") or "",
@@ -6743,7 +6744,7 @@ def report_export_xlsx():
         ])
 
     from openpyxl.utils import get_column_letter
-    widths = [12,7,11,11,11,13,10,17,17,22,17,17,8,26]
+    widths = [12,10,7,11,11,11,13,10,17,17,22,17,17,8,26]
     for i, w in enumerate(widths, start=1):
         ws.column_dimensions[get_column_letter(i)].width = w
 
