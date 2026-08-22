@@ -5976,17 +5976,32 @@ def report_weekly_html():
     week_label = f"{range_start.strftime('%d/%m/%Y')} — {to_value[8:10]}/{to_value[5:7]}/{to_value[0:4]}"
 
     range_start_str = range_start.strftime("%Y-%m-%dT%H:%M:%S")
+    PAGE_SIZE = 50
+    try:
+        page = max(1, int(request.args.get("page", "1")))
+    except (TypeError, ValueError):
+        page = 1
+    offset = (page - 1) * PAGE_SIZE
     rows = []
+    total_count = 0
     if SUPABASE_KEY:
         try:
             url = (f"{SUPABASE_URL}/rest/v1/alarm_assignments"
-                   f"?fired_at=gte.{range_start_str}&select=*&order=fired_at.asc")
+                   f"?fired_at=gte.{range_start_str}&select=*&order=fired_at.desc"
+                   f"&limit={PAGE_SIZE}&offset={offset}")
             if range_end:
                 url += f"&fired_at=lt.{range_end.strftime('%Y-%m-%dT%H:%M:%S')}"
-            r = requests.get(url, headers=_sb_h(), timeout=10)
-            if r.status_code == 200:
+            r = requests.get(url, headers={**_sb_h(), "Prefer": "count=exact"}, timeout=10)
+            if r.status_code in (200, 206):
                 rows = r.json()
+                cr = r.headers.get("Content-Range", "")  # مثلاً "0-49/213"
+                if "/" in cr:
+                    try: total_count = int(cr.split("/")[-1])
+                    except ValueError: total_count = len(rows)
+                else:
+                    total_count = len(rows)
         except: pass
+    total_pages = max(1, (total_count + PAGE_SIZE - 1) // PAGE_SIZE)
     alert_ids = sorted({str(r.get("id","")) for r in rows if r.get("id")})
     alerts_map = {}
     if SUPABASE_KEY and alert_ids:
@@ -6094,8 +6109,35 @@ def report_weekly_html():
     false_by_options = "".join(
         f'<option value="by:{name.lower()}">👤 {name}</option>' for name in sorted(false_by_set)
     )
-    active_count = sum(1 for r in rows if r.get("is_active"))
-    false_count  = len(rows) - active_count
+    # چون rows الان فقط همین صفحه‌ست، برای آمار سربرگ (کل/فعال/False) به‌جای
+    # فچ کامل، یه کوئری سبک count-only (بدون داده‌ی واقعی) برای کل بازه می‌زنیم.
+    def _sb_count_assignments(extra_filter=""):
+        if not SUPABASE_KEY: return 0
+        try:
+            u = (f"{SUPABASE_URL}/rest/v1/alarm_assignments"
+                 f"?fired_at=gte.{range_start_str}&select=id&limit=1{extra_filter}")
+            if range_end:
+                u += f"&fired_at=lt.{range_end.strftime('%Y-%m-%dT%H:%M:%S')}"
+            rc = requests.get(u, headers={**_sb_h(), "Prefer": "count=exact"}, timeout=10)
+            cr = rc.headers.get("Content-Range", "")
+            if "/" in cr:
+                return int(cr.split("/")[-1])
+        except Exception:
+            pass
+        return 0
+    active_count = _sb_count_assignments("&is_active=eq.true")
+    false_count  = total_count - active_count
+
+    pagination_html = ""
+    if total_pages > 1:
+        base_url = f"/report/weekly?from={from_value}&to={to_value}"
+        prev_link = f'<a href="{base_url}&page={page-1}" class="page-btn">← قبلی</a>' if page > 1 else '<span class="page-btn disabled">← قبلی</span>'
+        next_link = f'<a href="{base_url}&page={page+1}" class="page-btn">بعدی →</a>' if page < total_pages else '<span class="page-btn disabled">بعدی →</span>'
+        pagination_html = f'''<div class="pagination">
+          {prev_link}
+          <span class="page-info">صفحه {page} از {total_pages} ({total_count} مورد)</span>
+          {next_link}
+        </div>'''
     html = f"""<!DOCTYPE html>
 <html lang="fa" dir="rtl">
 <head>
@@ -6176,6 +6218,13 @@ def report_weekly_html():
   .preset-btn{{padding:8px 18px;border-radius:12px;border:1px solid var(--border2);background:var(--surface);
     color:var(--muted);font-size:12px;font-weight:600;cursor:pointer;transition:.25s;font-family:'Inter',Tahoma,sans-serif}}
   .preset-btn:hover{{border-color:var(--blue);color:var(--blue);transform:translateY(-2px)}}
+  .pagination{{display:flex;align-items:center;justify-content:center;gap:14px;margin:20px 0}}
+  .page-btn{{padding:8px 18px;border-radius:12px;border:1px solid var(--border2);background:var(--surface);
+    color:var(--blue);font-size:12px;font-weight:700;cursor:pointer;transition:.25s;text-decoration:none;
+    font-family:'Inter',Tahoma,sans-serif}}
+  .page-btn:hover{{border-color:var(--blue);transform:translateY(-2px)}}
+  .page-btn.disabled{{color:var(--muted);opacity:.4;pointer-events:none}}
+  .page-info{{font-size:12px;color:var(--muted);font-weight:600}}
   .range-inputs{{display:flex;gap:8px;align-items:center;flex-wrap:wrap;justify-content:center;
     background:var(--surface);border:1px solid var(--border2);border-radius:14px;padding:8px 14px;backdrop-filter:blur(10px)}}
   .range-inputs label{{display:flex;align-items:center;gap:6px;font-size:12px;color:var(--muted);font-weight:600}}
@@ -6284,14 +6333,18 @@ def report_weekly_html():
 <div class="scroll-bar"><div class="scroll-bar-fill" id="scrollFill"></div></div>
 <div class="scroll-dot" id="scrollDot">📈</div>
 <button class="theme-toggle" id="themeToggle" onclick="toggleTheme()">🌙</button>
+<a href="/report/export" target="_blank" rel="noopener" style="position:fixed;top:16px;left:64px;z-index:50;background:var(--surface,#1a1f2e);border:1px solid var(--border,#2a3142);border-radius:10px;padding:8px 14px;font-size:13px;color:inherit;text-decoration:none;display:flex;align-items:center;gap:6px">📥 دانلود دیتا</a>
 <div class="hero">
   <h1>📋 گزارش آلارم‌های تیم</h1>
   <div class="period">{week_label}</div>
   <div class="stats">
-    <div class="stat"><div class="num">{len(rows)}</div><div class="lbl2">کل آلارم</div></div>
+    <div class="stat"><div class="num">{total_count}</div><div class="lbl2">کل آلارم</div></div>
     <div class="stat green"><div class="num">{active_count}</div><div class="lbl2">فعال</div></div>
     <div class="stat red"><div class="num">{false_count}</div><div class="lbl2">False شده</div></div>
   </div>
+</div>
+<div style="text-align:center;margin:-8px 0 14px">
+  <a href="/report/export" target="_blank" rel="noopener" class="preset-btn" style="text-decoration:none;display:inline-block">📥 دانلود دیتا</a>
 </div>
 <form class="range-nav" id="rangeNav" method="get" action="/report/weekly">
   <div class="range-presets">
@@ -6324,6 +6377,7 @@ def report_weekly_html():
   {'<div class="empty"><div class="icon">📭</div>آلارمی ثبت نشده</div>' if not rows else rows_html}
   <div class="empty" id="noResults" style="display:none"><div class="icon">🔍</div>چیزی پیدا نشد</div>
 </div>
+{pagination_html}
 <div class="footer">آخرین بروزرسانی: {now_dt.strftime('%H:%M — %d/%m/%Y')}</div>
 <script>
   // فالس کردن یه آلارم مستقیم از همین صفحه (با کامنت اختیاری)
@@ -6439,6 +6493,268 @@ def report_weekly_html():
 </script>
 </body></html>"""
     return html, 200, {"Content-Type": "text/html; charset=utf-8"}
+
+@app.route("/report/export")
+def report_export_html():
+    """صفحه‌ی دانلود دیتا — بازه‌ی تاریخ + فیلترهای ترکیبی + دکمه‌ی خروجی اکسل"""
+    assignee_rows = "".join(
+        f'<label class="chk-row"><input type="checkbox" value="{m}" class="assigneeChk"> {m}</label>'
+        for m in TEAM_MEMBERS
+    )
+    today_str = datetime.now(TEHRAN).strftime("%Y-%m-%d")
+    month_ago_str = (datetime.now(TEHRAN) - timedelta(days=30)).strftime("%Y-%m-%d")
+    html = f"""<!DOCTYPE html>
+<html lang="fa" dir="rtl">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>دانلود دیتا — گزارش آلارم‌ها</title>
+<style>
+  :root{{--bg:#070a12;--surface:#0d1424;--surface2:#10192e;--border:#1e293b;--border2:#2d3f5c;
+    --text:#e2e8f0;--muted:#64748b;--blue:#3b82f6;--green:#22c55e;--red:#ef4444}}
+  *{{box-sizing:border-box}}
+  body{{font-family:'Inter',Tahoma,sans-serif;background:var(--bg);color:var(--text);min-height:100vh;
+    direction:rtl;margin:0;padding:24px 16px;display:flex;justify-content:center}}
+  .card{{max-width:560px;width:100%;background:var(--surface);border:1px solid var(--border2);
+    border-radius:18px;padding:26px 22px}}
+  h1{{font-size:19px;margin:0 0 4px;font-weight:800}}
+  .sub{{font-size:12px;color:var(--muted);margin-bottom:22px}}
+  .fld{{margin-bottom:16px}}
+  label{{display:block;font-size:12px;color:var(--muted);font-weight:600;margin-bottom:6px}}
+  input[type=date],input[type=text]{{width:100%;padding:10px 12px;border-radius:10px;
+    border:1px solid var(--border2);background:var(--surface2);color:var(--text);font-size:13px;
+    font-family:inherit;outline:none}}
+  input:focus{{border-color:var(--blue)}}
+  .row2{{display:flex;gap:10px}}
+  .row2 .fld{{flex:1}}
+  .chk-group{{display:flex;flex-wrap:wrap;gap:10px;background:var(--surface2);
+    border:1px solid var(--border2);border-radius:10px;padding:12px 14px}}
+  .chk-row{{display:flex;align-items:center;gap:6px;font-size:13px;margin:0;font-weight:400;color:var(--text)}}
+  .chk-row input{{width:16px;height:16px}}
+  .dl-btn{{width:100%;padding:13px;border:none;border-radius:12px;background:linear-gradient(135deg,var(--blue),#2563eb);
+    color:#fff;font-size:14px;font-weight:800;cursor:pointer;margin-top:8px;transition:.2s}}
+  .dl-btn:hover{{filter:brightness(1.1)}}
+  .hint{{font-size:11px;color:var(--muted);margin-top:6px;line-height:1.7}}
+  a.back{{color:var(--blue);font-size:12px;text-decoration:none;display:inline-block;margin-bottom:14px}}
+</style>
+</head>
+<body>
+<div class="card">
+  <a class="back" href="/report/weekly">→ برگشت به گزارش هفتگی</a>
+  <h1>📥 دانلود دیتا</h1>
+  <div class="sub">یه بازه و فیلتر انتخاب کن، فایل اکسل (xlsx) دانلود کن.</div>
+
+  <div class="row2">
+    <div class="fld"><label>از تاریخ</label><input type="date" id="expFrom" value="{month_ago_str}"></div>
+    <div class="fld"><label>تا تاریخ</label><input type="date" id="expTo" value="{today_str}"></div>
+  </div>
+
+  <div class="fld">
+    <label>وضعیت (خالی = همه)</label>
+    <div class="chk-group">
+      <label class="chk-row"><input type="checkbox" value="fired" class="statusChk"> ✅ فایرشده</label>
+      <label class="chk-row"><input type="checkbox" value="false" class="statusChk"> ❌ False شده</label>
+      <label class="chk-row"><input type="checkbox" value="expired" class="statusChk"> ⌛ منقضی‌شده</label>
+      <label class="chk-row"><input type="checkbox" value="active" class="statusChk"> 🟢 فعال</label>
+    </div>
+  </div>
+
+  <div class="fld">
+    <label>مسئول (خالی = همه)</label>
+    <div class="chk-group">{assignee_rows}</div>
+  </div>
+
+  <div class="row2">
+    <div class="fld">
+      <label>ثبت‌کننده (اختیاری — چندتا با کاما)</label>
+      <input type="text" id="expCreator" placeholder="مثلاً مسعود, علی">
+    </div>
+    <div class="fld">
+      <label>نماد/ارز (اختیاری — چندتا با کاما)</label>
+      <input type="text" id="expSymbol" placeholder="مثلاً XAUUSD, EURUSD" dir="ltr">
+    </div>
+  </div>
+
+  <button class="dl-btn" id="dlBtn" onclick="doExport()">📥 دانلود اکسل</button>
+  <div class="hint">بازه‌ی تاریخ بر اساس تاریخ ثبت آلارم اعمال می‌شه. فیلترها با هم AND می‌شن.</div>
+</div>
+<script>
+function doExport() {{
+  const from = document.getElementById('expFrom').value;
+  const to = document.getElementById('expTo').value;
+  const statuses = Array.from(document.querySelectorAll('.statusChk:checked')).map(c => c.value).join(',');
+  const assignees = Array.from(document.querySelectorAll('.assigneeChk:checked')).map(c => c.value).join(',');
+  const creator = document.getElementById('expCreator').value.trim();
+  const symbol = document.getElementById('expSymbol').value.trim();
+  const params = new URLSearchParams();
+  if (from) params.set('from', from);
+  if (to) params.set('to', to);
+  if (statuses) params.set('statuses', statuses);
+  if (assignees) params.set('assignees', assignees);
+  if (creator) params.set('creator', creator);
+  if (symbol) params.set('symbol', symbol);
+  window.location.href = '/api/report/export.xlsx?' + params.toString();
+}}
+</script>
+</body></html>"""
+    return html, 200, {"Content-Type": "text/html; charset=utf-8"}
+
+
+@app.route("/api/report/export.xlsx")
+def report_export_xlsx():
+    """
+    خروجی اکسل واقعی (xlsx) — هدفمند و محدود به بازه/فیلتر انتخاب‌شده، نه کل جدول.
+    وضعیت «False شده» از جدول alarm_assignments (is_active=false) تشخیص داده می‌شه،
+    نه از خود alerts — چون False یه ویژگی از assignment هست، نه خود آلارم.
+    """
+    try:
+        from openpyxl import Workbook
+        from openpyxl.styles import Font, Alignment, PatternFill
+    except ImportError:
+        return jsonify({"ok": False, "error": "پکیج openpyxl روی سرور نصب نیست — باید به requirements.txt اضافه بشه."}), 500
+
+    from_str = request.args.get("from", "")
+    to_str = request.args.get("to", "")
+    statuses = [s.strip() for s in request.args.get("statuses", "").split(",") if s.strip()]
+    assignees = [a.strip() for a in request.args.get("assignees", "").split(",") if a.strip()]
+    creators = [c.strip() for c in request.args.get("creator", "").split(",") if c.strip()]
+    symbols = [s.strip().upper() for s in request.args.get("symbol", "").split(",") if s.strip()]
+
+    want_all = not statuses
+    want_fired = want_all or "fired" in statuses
+    want_false = want_all or "false" in statuses
+    want_expired = want_all or "expired" in statuses
+    want_active = want_all or "active" in statuses
+    alert_statuses_needed = set()
+    if want_fired or want_false: alert_statuses_needed.add("fired")
+    if want_expired: alert_statuses_needed.add("expired")
+    if want_active: alert_statuses_needed.add("active")
+
+    if not SUPABASE_KEY:
+        return jsonify({"ok": False, "error": "Supabase تنظیم نشده"}), 500
+
+    now_dt = datetime.now(TEHRAN)
+    try:
+        range_start = TEHRAN.localize(datetime.strptime(from_str, "%Y-%m-%d")) if from_str else (now_dt - timedelta(days=30))
+    except Exception:
+        range_start = now_dt - timedelta(days=30)
+    try:
+        range_end = TEHRAN.localize(datetime.strptime(to_str, "%Y-%m-%d")) + timedelta(days=1) if to_str else now_dt + timedelta(days=1)
+    except Exception:
+        range_end = now_dt + timedelta(days=1)
+    range_start_str = range_start.strftime("%Y-%m-%dT%H:%M:%S")
+    range_end_str = range_end.strftime("%Y-%m-%dT%H:%M:%S")
+
+    assignments_map = {}  # alert_id -> {assigned_to, is_active, false_by, false_at, false_reason}
+
+    def _fetch_assignments(ids_list=None, assignee_list=None):
+        u = f"{SUPABASE_URL}/rest/v1/alarm_assignments?select=id,assigned_to,is_active,false_by,false_at,false_reason&limit=5000"
+        if ids_list:
+            u += f"&id=in.({','.join(ids_list)})"
+        else:
+            u += f"&fired_at=gte.{range_start_str}&fired_at=lt.{range_end_str}"
+        if assignee_list:
+            u += f"&assigned_to=in.({','.join(assignee_list)})"
+        r = requests.get(u, headers=_sb_h(), timeout=15)
+        return r.json() if r.status_code == 200 else []
+
+    try:
+        if assignees:
+            # اول assignmentهای همون مسئول‌ها تو این بازه، بعد alertهای متناظرشون
+            assign_rows = _fetch_assignments(assignee_list=assignees)
+            for x in assign_rows:
+                assignments_map[str(x.get("id",""))] = x
+            ids = sorted(assignments_map.keys())
+            if not ids:
+                rows = []
+            else:
+                u2 = f"{SUPABASE_URL}/rest/v1/alerts?id=in.({','.join(ids)})&select=*"
+                if creators:
+                    u2 += f"&created_by=in.({','.join(creators)})"
+                if symbols:
+                    u2 += f"&symbol=in.({','.join(symbols)})"
+                r2 = requests.get(u2, headers=_sb_h(), timeout=15)
+                rows = r2.json() if r2.status_code == 200 else []
+        else:
+            u = (f"{SUPABASE_URL}/rest/v1/alerts"
+                 f"?created_at=gte.{range_start_str}&created_at=lt.{range_end_str}&select=*&limit=5000")
+            if alert_statuses_needed:
+                u += f"&status=in.({','.join(sorted(alert_statuses_needed))})"
+            if creators:
+                u += f"&created_by=in.({','.join(creators)})"
+            if symbols:
+                u += f"&symbol=in.({','.join(symbols)})"
+            r = requests.get(u, headers=_sb_h(), timeout=15)
+            rows = r.json() if r.status_code == 200 else []
+            rows = [x for x in rows if x.get("id") != "__config__"]
+            row_ids = sorted({str(x.get("id","")) for x in rows if x.get("id")})
+            if row_ids:
+                for x in _fetch_assignments(ids_list=row_ids):
+                    assignments_map[str(x.get("id",""))] = x
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 500
+
+    # فیلتر نهایی بر اساس فایر/False/منقضی/فعال — چون False یه وضعیتِ خودِ alerts.status نیست
+    final_rows = []
+    for a in rows:
+        st = a.get("status", "")
+        asg = assignments_map.get(str(a.get("id","")), {})
+        is_false = st == "fired" and asg.get("is_active") is False
+        if st == "fired" and is_false and want_false:
+            final_rows.append((a, asg, "False شده"))
+        elif st == "fired" and not is_false and want_fired:
+            final_rows.append((a, asg, "فایرشده"))
+        elif st == "expired" and want_expired:
+            final_rows.append((a, asg, "منقضی‌شده"))
+        elif st == "active" and want_active:
+            final_rows.append((a, asg, "فعال"))
+
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "آلارم‌ها"
+    ws.sheet_view.rightToLeft = True
+    headers = ["نماد","جهت","قیمت هدف","قیمت فایر","وضعیت","ثبت‌کننده","مسئول",
+               "تاریخ ثبت","تاریخ فایر","علت False","تاریخ False","تاریخ انقضا","خصوصی","کامنت"]
+    ws.append(headers)
+    header_fill = PatternFill("solid", fgColor="1E293B")
+    for cell in ws[1]:
+        cell.font = Font(bold=True, color="FFFFFF")
+        cell.fill = header_fill
+        cell.alignment = Alignment(horizontal="center")
+
+    for a, asg, status_lbl in final_rows:
+        ws.append([
+            a.get("symbol",""),
+            "بای" if a.get("condition") == "below" else "سل",
+            a.get("target_price",""),
+            a.get("fired_price","") or "",
+            status_lbl,
+            a.get("created_by",""),
+            asg.get("assigned_to","") or "",
+            a.get("created_at",""),
+            a.get("fired_at","") or "",
+            asg.get("false_reason","") or "",
+            asg.get("false_at","") or "",
+            a.get("expired_at","") or "",
+            "بله" if a.get("is_private") else "",
+            a.get("comment",""),
+        ])
+
+    from openpyxl.utils import get_column_letter
+    widths = [12,7,11,11,11,13,10,17,17,22,17,17,8,26]
+    for i, w in enumerate(widths, start=1):
+        ws.column_dimensions[get_column_letter(i)].width = w
+
+    import io
+    buf = io.BytesIO()
+    wb.save(buf)
+    buf.seek(0)
+    fname = f"alarms_export_{from_str or 'all'}_{to_str or 'all'}.xlsx"
+    return buf.read(), 200, {
+        "Content-Type": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        "Content-Disposition": f'attachment; filename="{fname}"'
+    }
+
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5000))
