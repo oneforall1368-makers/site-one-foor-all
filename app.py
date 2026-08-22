@@ -6578,7 +6578,8 @@ def report_export_html():
   </div>
 
   <button class="dl-btn" id="dlBtn" onclick="doExport()">📥 دانلود اکسل</button>
-  <div class="hint">بازه‌ی تاریخ بر اساس تاریخ فایر شدن آلارم اعمال می‌شه. فیلترها با هم AND می‌شن.</div>
+  <div class="hint">بازه‌ی تاریخ بر اساس تاریخ فایر شدن آلارم اعمال می‌شه. فیلترها با هم AND می‌شن.<br>
+  ⓘ آلارم‌های فایرشده‌ی قبل از ۱۱ ژوئن ۲۰۲۶ («فایرشده (قدیمی)» تو ستون وضعیت) مربوط به قبل از راه‌اندازی سیستم «مسئول آلارم» هستن — برای این‌ها ستون‌های «مسئول» و «علت/تاریخ False» همیشه خالیه، چون اون‌موقع اصلاً همچین چیزی ثبت نمی‌شد. اگه فیلتر «مسئول» رو فعال کنید، این آلارم‌های قدیمی (چون مسئول ندارن) تو خروجی نمیان.</div>
 </div>
 <script>
 function doExport() {{
@@ -6644,6 +6645,11 @@ def report_export_xlsx():
     range_end_str = range_end.strftime("%Y-%m-%dT%H:%M:%S")
 
     assignments_map = {}  # alert_id -> {assigned_to, is_active, false_by, false_at, false_reason, alarm_tag}
+
+    # جدول alarm_assignments (مسئول/False) از این تاریخ به بعد ساخته و پر شده — آلارم‌های
+    # فایرشده‌ی قدیمی‌تر از این، فقط تو خود alerts (status=fired) هستن و مسئول/False ندارن.
+    ASSIGN_SYSTEM_START = TEHRAN.localize(datetime(2026, 6, 11, 0, 0, 0))
+    assign_start_str = ASSIGN_SYSTEM_START.strftime("%Y-%m-%dT%H:%M:%S")
 
     def _fetch_assignments(ids_list=None, assignee_list=None):
         base_select = "select=id,assigned_to,is_active,false_by,false_at,false_reason,alarm_tag"
@@ -6717,6 +6723,27 @@ def report_export_xlsx():
             expired_rows = re_exp.json() if re_exp.status_code == 200 else []
             existing_ids = {str(x.get("id","")) for x in rows}
             rows += [x for x in expired_rows if str(x.get("id","")) not in existing_ids]
+
+        # ── دیتای قدیمی (قبل از ساخته‌شدن alarm_assignments) — اون‌موقع هنوز مفهوم
+        # «مسئول»/False اصلاً نبود، پس این آلارم‌ها هیچ‌وقت تو alarm_assignments ثبت
+        # نمی‌شن. اگه بخشی از بازه‌ی انتخابی قبل از اون تاریخ باشه، مستقیم از خود
+        # alerts (status=fired) میاریمشون — بدون فیلتر مسئول (چون اصلاً معنی نداره). ──
+        if (want_fired or want_false or want_all) and not assignees and range_start < ASSIGN_SYSTEM_START:
+            legacy_end = min(range_end, ASSIGN_SYSTEM_START)
+            ul = (f"{SUPABASE_URL}/rest/v1/alerts"
+                  f"?fired_at=gte.{range_start_str}&fired_at=lt.{legacy_end.strftime('%Y-%m-%dT%H:%M:%S')}"
+                  f"&status=eq.fired&select=*&limit=5000")
+            if creators:
+                ul += f"&created_by=in.({','.join(creators)})"
+            if symbols:
+                ul += f"&symbol=in.({','.join(symbols)})"
+            r_legacy = requests.get(ul, headers=_sb_h(), timeout=15)
+            legacy_rows = r_legacy.json() if r_legacy.status_code == 200 else []
+            existing_ids = {str(x.get("id","")) for x in rows}
+            for x in legacy_rows:
+                if str(x.get("id","")) not in existing_ids:
+                    x["_legacy"] = True
+                    rows.append(x)
     except Exception as e:
         return jsonify({"ok": False, "error": str(e)}), 500
 
@@ -6727,7 +6754,11 @@ def report_export_xlsx():
     for a in rows:
         st = a.get("status", "")
         asg = assignments_map.get(str(a.get("id","")), {})
-        if st == "fired":
+        if a.get("_legacy") and st == "fired":
+            # آلارم قدیمی از قبل سیستم مسئول — مفهوم مسئول/False براش وجود نداره
+            if want_fired or want_false or want_all:
+                final_rows.append((a, {}, "فایرشده (قدیمی)"))
+        elif st == "fired":
             is_false = asg.get("is_active") is False
             if is_false:
                 if want_fired or want_false:
